@@ -1,0 +1,22 @@
+{
+  "appId": "app.krok.mobile",
+  "appName": "КРОК",
+  "webDir": "dist",
+  "backgroundColor": "#101213",
+  "android": {
+    "backgroundColor": "#101213",
+    "allowMixedContent": false
+  },
+  "plugins": {
+    "SystemBars": {
+      "insetsHandling": "css",
+      "initialViewportFitValueHint": "cover",
+      "style": "DARK",
+      "hidden": false
+    },
+    "LocalNotifications": {
+      "smallIcon": "ic_stat_krok",
+      "iconColor": "#D5F56A"
+    }
+  }
+}

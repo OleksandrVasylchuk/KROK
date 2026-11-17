@@ -1,0 +1,22 @@
+import React from 'react';
+import { createRoot } from 'react-dom/client';
+import '@fontsource/manrope/latin-400.css';
+import '@fontsource/manrope/latin-500.css';
+import '@fontsource/manrope/latin-600.css';
+import '@fontsource/manrope/latin-700.css';
+import '@fontsource/manrope/latin-800.css';
+import '@fontsource/manrope/cyrillic-400.css';
+import '@fontsource/manrope/cyrillic-500.css';
+import '@fontsource/manrope/cyrillic-600.css';
+import '@fontsource/manrope/cyrillic-700.css';
+import '@fontsource/manrope/cyrillic-800.css';
+import AccountBoundary from './AccountBoundary.jsx';
+import { registerWebApp } from './PlatformUI.jsx';
+import './styles.css';
+import './platform.css';
+import './appearance.css';
+import './impulse-home.css';
+
+registerWebApp();
+const root = createRoot(document.getElementById('root'));
+root.render(<React.StrictMode><AccountBoundary /></React.StrictMode>);

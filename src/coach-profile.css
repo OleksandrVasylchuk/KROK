@@ -1,0 +1,19 @@
+.coach-profile-setup{margin:18px 26px 0;padding:16px;background:#111514;border:1px solid #ffffff0d;border-radius:12px}
+.coach-profile-top,.coach-profile-summary,.coach-profile-summary-actions,.coach-profile-actions{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.coach-profile-summary>div:first-child{min-width:0}
+.coach-profile-summary strong{display:block;margin-top:8px;font-size:13px;font-weight:500;line-height:1.6;color:#e3e7e2;overflow-wrap:anywhere}
+.coach-profile-summary p{margin:5px 0 0;color:#a8b0aa;font-size:11px;line-height:1.7;overflow-wrap:anywhere}
+.coach-profile-edit{padding:9px 0;border:0;background:none;color:#d9ab88;font:inherit;font-size:11px;cursor:pointer;white-space:nowrap}
+.coach-profile-form h2{margin:15px 0 5px;color:#e7ebe7;font-size:17px;font-weight:500;line-height:1.5}
+.coach-profile-form>p{margin:0;color:#9da79f;font-size:11px;line-height:1.7}
+.coach-priority-options,.coach-time-options{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;margin-top:14px}
+.coach-priority-options button,.coach-time-options button{min-height:40px;padding:8px 10px;border:1px solid #ffffff14;border-radius:9px;background:#ffffff03;color:#c5ccc6;font:inherit;font-size:11px;text-align:left;cursor:pointer}
+.coach-priority-options button[aria-pressed=true],.coach-time-options button[aria-pressed=true]{border-color:#f48b5566;background:#f48b5512;color:#f0b18c}
+.coach-profile-answer{display:block;margin-top:14px}
+.coach-profile-answer textarea{width:100%;min-height:82px;padding:11px;border:1px solid #ffffff14;border-radius:9px;background:#0d100f;color:#e3e7e2;font:inherit;font-size:13px;line-height:1.6;resize:vertical}
+.coach-profile-answer textarea::placeholder{color:#7f8982}
+.coach-profile-error{margin:10px 0 0!important;color:#f1a181!important}
+.coach-profile-actions{justify-content:flex-end;margin-top:13px}
+.coach-profile-next{min-height:40px;padding:8px 15px;border:1px solid #e29a6d55;border-radius:9px;background:#e29a6d18;color:#f0b18c;font:inherit;font-size:11px;cursor:pointer}
+.coach-profile-storage{margin:13px 0 0!important;padding-top:10px;border-top:1px solid #ffffff0a;color:#828c85!important;font-size:10px!important}
+@media(max-width:640px){.coach-profile-setup{margin:15px 17px 0;padding:13px}.coach-profile-form h2{font-size:16px}.coach-profile-summary-actions{align-items:flex-end;flex-direction:column;gap:2px}.coach-profile-edit{min-height:36px}}
