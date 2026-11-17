@@ -15,4 +15,4 @@ $configuration = @{supabaseUrl=$projectUrl;publishableKey=$publicKey;googleEnabl
 [System.IO.File]::WriteAllText($destination,$configuration,[System.Text.UTF8Encoding]::new($false))
 Write-Host 'Saved public account settings. In KROK open Account and click Check connection.' -ForegroundColor Green
 Write-Host 'Google client secret belongs ONLY in Supabase dashboard; no secret is needed by this app.'
-Write-Host 'See AUTH_SETUP.md for redirect URLs, email setup and limitations.'
+Write-Host 'See README.md for redirect URLs, email setup and limitations.'
