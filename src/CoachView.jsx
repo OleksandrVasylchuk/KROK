@@ -7,7 +7,9 @@ import { createVoiceInput } from './voice-input.js';
 import { createVoiceOutput } from './voice-output.js';
 import { createTalkSession } from './talk-session.js';
 import CoachActionPreview from './CoachActionPreview.jsx';
+import { COACH_SCENARIOS, buildScenarioMessage, scenarioAnswer, scenarioProfilePatch } from './coach-scenarios.js';
 import './coach.css';
+import './coach-scenario.css';
 import './coach-profile.css';
 import './home-coach.css';
 import './coach-talk.css';
@@ -111,6 +113,9 @@ export default function CoachView({ state, dispatch, onJourney, disabled = false
   const [speechError, setSpeechError] = useState('');
   const [talkConsent, setTalkConsent] = useState(false);
   const [talkPhase, setTalkPhase] = useState('idle');
+  const [scenario, setScenario] = useState(null);
+  const [scenarioError, setScenarioError] = useState('');
+  const scenarioRef = useRef(null);
   const messagesRef = useRef(null);
   const composerRef = useRef(null);
   const homeButtonRef = useRef(null);
@@ -264,6 +269,96 @@ export default function CoachView({ state, dispatch, onJourney, disabled = false
     return () => window.removeEventListener('krok:coach-prompt', receivePrompt);
   }, [isHome]);
 
+  function changeScenario(next) {
+    scenarioRef.current = next;
+    setScenario(next);
+    setScenarioError('');
+  }
+
+  // A scripted scenario asks its questions locally and spends one request at the end.
+  async function startScenario(id, prefill = {}) {
+    const definition = COACH_SCENARIOS[id];
+    if (!definition || disabledRef.current || requestRef.current) return;
+    if (!isOpenAI) {
+      setError('Цей сценарій працює з ШІ-тренером. Обери режим OpenAI в налаштуваннях тренера.');
+      if (isHome) setHomeOpen(true);
+      return;
+    }
+    acceptVoiceRef.current = false;
+    await talkRef.current?.stop(); await voiceRef.current?.cancel(); await speechRef.current?.cancel();
+    if (!mounted.current || disabledRef.current) return;
+    const answers = definition.questions.map(question => scenarioAnswer(prefill?.[question.id]));
+    const savedDraft = scenarioRef.current ? scenarioRef.current.savedDraft : draftRef.current;
+    changeScenario({ id, step: 0, answers, savedDraft });
+    updateDraft(answers[0]);
+    setError(null); setVoiceNotice(''); setVoiceError('');
+    homeOpenModeRef.current = 'text';
+    if (isHome) setHomeOpen(true);
+    requestAnimationFrame(() => {
+      const composer = composerRef.current;
+      (composer?.closest('.home-coach-open') || composer)?.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth', block: 'start' });
+      composer?.focus({ preventScroll: true });
+    });
+  }
+  const startScenarioRef = useRef(startScenario);
+  startScenarioRef.current = startScenario;
+
+  useEffect(() => {
+    const receiveScenario = event => { void startScenarioRef.current(event.detail?.id, event.detail?.prefill); };
+    window.addEventListener('krok:coach-scenario', receiveScenario);
+    return () => window.removeEventListener('krok:coach-scenario', receiveScenario);
+  }, []);
+
+  function cancelScenario() {
+    const current = scenarioRef.current;
+    if (!current) return;
+    if (talkRef.current?.isActive()) void talkRef.current.stop();
+    changeScenario(null);
+    updateDraft(current.savedDraft || '');
+    setVoiceNotice('Сценарій скасовано. Нічого не надіслано й не змінено.');
+  }
+
+  function scenarioBack() {
+    const current = scenarioRef.current;
+    if (!current || current.step === 0) return;
+    const answers = [...current.answers]; answers[current.step] = scenarioAnswer(draftRef.current);
+    changeScenario({ ...current, step: current.step - 1, answers });
+    updateDraft(answers[current.step - 1] || '');
+  }
+
+  /** Stores one answer. Returns the next local question, or the composed message after the last one. */
+  function scenarioStep(raw, { skip = false } = {}) {
+    const current = scenarioRef.current, definition = COACH_SCENARIOS[current.id], question = definition.questions[current.step];
+    const answer = skip ? '' : scenarioAnswer(raw);
+    if (!answer && question.required) return { error: 'Дай коротку відповідь на це запитання або скасуй сценарій.' };
+    const answers = [...current.answers]; answers[current.step] = answer;
+    if (current.step < definition.questions.length - 1) {
+      changeScenario({ ...current, step: current.step + 1, answers });
+      return { question: definition.questions[current.step + 1], answers };
+    }
+    return { message: buildScenarioMessage(current.id, answers), answers, current };
+  }
+
+  function completeScenario(result) {
+    const patch = scenarioProfilePatch(result.current.id, result.answers, stateRef.current.profile);
+    if (patch) dispatch({ type: 'UPDATE_PROFILE', profile: patch });
+    changeScenario(null);
+    updateDraft(result.current.savedDraft || '');
+  }
+
+  function advanceScenario(options) {
+    const current = scenarioRef.current;
+    if (!current || disabledRef.current || requestRef.current || sendRef.current || voiceBusy || talkRef.current?.isActive()) return;
+    const last = current.step === COACH_SCENARIOS[current.id].questions.length - 1;
+    if (last && !isOpenAI) { setScenarioError('Сценарій потребує режиму OpenAI. Обери його в налаштуваннях тренера або скасуй сценарій.'); return; }
+    if (last && !available) { setScenarioError('Тренер зараз недоступний. Відповіді збережено тут — перевір налаштування та спробуй ще раз.'); return; }
+    const result = scenarioStep(draftRef.current, options);
+    if (result.error) { setScenarioError(result.error); return; }
+    if (result.question) { updateDraft(result.answers[current.step + 1] || ''); composerRef.current?.focus({ preventScroll: true }); return; }
+    completeScenario(result);
+    void send(result.message);
+  }
+
   useEffect(() => {
     const pane = messagesRef.current;
     if (pane) pane.scrollTop = pane.scrollHeight;
@@ -369,19 +464,22 @@ export default function CoachView({ state, dispatch, onJourney, disabled = false
     setError('Очікування скасовано. Повідомлення збережено; нові зміни не додано.');
   }
 
-  async function send() {
-    if (disabledRef.current || requestRef.current || sendRef.current || !available || voiceBusy || talkRef.current?.isActive() || !draftRef.current.trim()) return;
+  async function send(prepared) {
+    const composed = typeof prepared === 'string';
+    if (!composed && scenarioRef.current) { advanceScenario(); return; }
+    if (disabledRef.current || requestRef.current || sendRef.current || !available || voiceBusy || talkRef.current?.isActive() || !(composed ? prepared : draftRef.current).trim()) return;
     sendRef.current = true;
     try {
       acceptVoiceRef.current = false;
       await voiceRef.current?.cancel();
       await speechRef.current?.cancel();
       if (!mounted.current || disabledRef.current) return;
-      const text = draftRef.current.trim().slice(0, COACH_MESSAGE_LIMIT);
+      const text = (composed ? prepared : draftRef.current).trim().slice(0, COACH_MESSAGE_LIMIT);
       if (!text) return;
       const message = { role: 'user', text, source: mode };
       dispatch({ type: 'ADD_MESSAGE', message });
-      updateDraft(''); setError(null); setVoiceNotice(''); setVoiceError('');
+      if (!composed) updateDraft('');
+      setError(null); setVoiceNotice(''); setVoiceError('');
       if (isOpenAI) requestReply([...stateRef.current.messages, message]);
       else dispatch({ type: 'ADD_MESSAGE', message: { role: 'assistant', text: coachReply(text, stateRef.current), source: 'local' } });
     } catch (cause) {
@@ -391,6 +489,15 @@ export default function CoachView({ state, dispatch, onJourney, disabled = false
 
   submitTalkRef.current = async text => {
     if (disabledRef.current || !available || requestRef.current || !talkRef.current?.isActive()) throw new Error('Розмову призупинено. Перевір з’єднання й спробуй ще раз.');
+    if (scenarioRef.current) {
+      // Scripted questions are spoken locally; only the last answer triggers the single request.
+      const result = scenarioStep(text);
+      updateDraft('');
+      if (result.error) return { text: result.error, actions: [] };
+      if (result.question) return { text: result.question.text, actions: [] };
+      completeScenario(result);
+      text = result.message;
+    }
     const message = { role: 'user', text: text.trim().slice(0, COACH_MESSAGE_LIMIT), source: mode };
     dispatch({ type: 'ADD_MESSAGE', message });
     updateDraft(''); setError(null); setVoiceError(''); setSpeechError('');
@@ -407,6 +514,12 @@ export default function CoachView({ state, dispatch, onJourney, disabled = false
   async function startConversation() {
     if (!talkConsent || controlsDisabled || !available || draftRef.current.trim() || voiceSupport !== 'supported' || !speechSupport.supported || speechSupport.languageAvailable === false) return;
     setVoiceError(''); setSpeechError(''); setVoiceNotice('');
+    const current = scenarioRef.current;
+    if (current) {
+      // Speak the current scripted question before the first listening turn.
+      try { await speechRef.current?.speak(COACH_SCENARIOS[current.id].questions[current.step].text); } catch { /* The question stays visible on screen. */ }
+      if (!mounted.current || disabledRef.current || scenarioRef.current !== current) return;
+    }
     await talkRef.current?.start();
   }
 
@@ -429,10 +542,28 @@ export default function CoachView({ state, dispatch, onJourney, disabled = false
       : status.phase === 'loading' ? 'Перевіряємо налаштування…'
         : status.phase === 'setup' ? 'OpenAI · потрібне налаштування' : 'OpenAI · немає з’єднання';
 
+  const scenarioDefinition = scenario ? COACH_SCENARIOS[scenario.id] : null;
+  const scenarioQuestion = scenarioDefinition?.questions[scenario.step];
+  const scenarioLast = scenarioDefinition ? scenario.step === scenarioDefinition.questions.length - 1 : false;
+
   const composition = <>
+        {scenarioDefinition && <section className="coach-scenario" aria-label={scenarioDefinition.title}>
+          <div className="coach-scenario-top"><span className="eyebrow">{scenarioDefinition.title} · {scenario.step + 1} з {scenarioDefinition.questions.length}</span><button type="button" className="coach-scenario-link" onClick={cancelScenario}>Скасувати</button></div>
+          <h3 id="coach-scenario-question">{scenarioQuestion.text}</h3>
+          <p>{scenarioQuestion.hint}</p>
+          {scenarioQuestion.options && <div className="coach-scenario-options">{scenarioQuestion.options.map(option => <button type="button" key={option} aria-pressed={draft === option} disabled={controlsDisabled} onClick={() => updateDraft(option)}>{option}</button>)}</div>}
+          <div className="coach-scenario-actions">
+            {scenario.step > 0 && <button type="button" className="coach-scenario-link" disabled={controlsDisabled} onClick={scenarioBack}>Назад</button>}
+            {speechSupport.supported && <button type="button" className="coach-scenario-link" disabled={controlsDisabled || talkActive} onClick={() => readAnswer(scenarioQuestion.text)}><SpeakerHigh size={15} /> Озвучити</button>}
+            {!scenarioQuestion.required && <button type="button" className="coach-scenario-link" disabled={controlsDisabled || talkActive} onClick={() => advanceScenario({ skip: true })}>Пропустити</button>}
+            <button type="button" className="button button-primary coach-scenario-next" disabled={controlsDisabled || talkActive || (scenarioQuestion.required && !draft.trim())} onClick={() => advanceScenario()}>{scenarioLast ? scenarioDefinition.sendLabel : 'Далі'}</button>
+          </div>
+          {scenarioError && <p className="coach-voice-error" role="alert">{scenarioError}</p>}
+          <p className="coach-scenario-note">{scenarioLast ? 'Після цієї відповіді тренер отримає твої слова одним запитом і запропонує зміни. Вони застосуються лише після твого підтвердження.' : 'Відповідь можна написати або надиктувати нижче. Запитання ставить сам застосунок — запит до ШІ буде один, наприкінці.'}</p>
+        </section>}
         <form className="v-chat-composer" onSubmit={event => { event.preventDefault(); send(); }}>
-          <label className="v-sr-only" htmlFor="coach-message">Повідомлення тренеру</label>
-          <textarea id="coach-message" ref={composerRef} value={draft} onChange={event => updateDraft(event.target.value)} maxLength={COACH_MESSAGE_LIMIT} placeholder="Напиши або натисни мікрофон…" rows={2} autoComplete="off" disabled={disabled || pending || talkActive} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); send(); } }} />
+          <label className="v-sr-only" htmlFor="coach-message">{scenarioQuestion ? scenarioQuestion.text : 'Повідомлення тренеру'}</label>
+          <textarea id="coach-message" ref={composerRef} value={draft} onChange={event => updateDraft(event.target.value)} maxLength={COACH_MESSAGE_LIMIT} placeholder={scenarioQuestion ? scenarioQuestion.placeholder : 'Напиши або натисни мікрофон…'} rows={2} autoComplete="off" disabled={disabled || pending || talkActive} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); send(); } }} />
           <div className="coach-composer-buttons"><button className={'coach-mic ' + (voiceBusy ? 'is-listening' : '')} type="button" disabled={disabled || pending || talkActive || voiceSupport !== 'supported' || voicePhase === 'stopping'} aria-label={voicePhase === 'listening' ? 'Завершити диктування' : voicePhase === 'starting' ? 'Скасувати запуск мікрофона' : voiceSupport === 'unsupported' ? 'Голосове введення недоступне' : 'Надиктувати повідомлення'} aria-pressed={voiceBusy} onClick={voicePhase === 'listening' ? finishVoice : voicePhase === 'starting' ? cancelVoice : startVoice}>{voiceBusy ? <Stop size={19} weight="fill" /> : <Microphone size={21} />}</button><button className="v-send" type="submit" disabled={!draft.trim() || controlsDisabled || talkActive || !available} aria-label="Надіслати повідомлення"><PaperPlaneTilt size={21} /></button></div>
         </form>
         <div className="coach-voice-status" aria-live="polite">
@@ -455,7 +586,7 @@ export default function CoachView({ state, dispatch, onJourney, disabled = false
 
   if (isHome && !homeOpen) return <section className="home-coach-entry" aria-label="Тренер на головній">
     <div className="home-coach-intro"><span className="eyebrow"><Sparkle size={15} /> ТВІЙ ТРЕНЕР ПОРУЧ</span><h2>Почни з розмови.</h2><p>Розкажи, що хочеш змінити. Разом перетворимо це на посильні квести, звички й цілі.</p></div>
-    <div className="home-coach-actions"><button ref={homeButtonRef} type="button" className="button button-primary home-coach-speak" disabled={disabled || voiceBusy || pending || voiceSupport === 'unsupported'} onClick={() => openHomeConversation(true)}><Microphone size={23} /> Говорити з тренером</button><button type="button" className="home-coach-write" disabled={disabled} onClick={() => openHomeConversation(false)}>Написати тренеру <ArrowUpRight size={16} /></button></div>
+    <div className="home-coach-actions"><button ref={homeButtonRef} type="button" className="button button-primary home-coach-speak" disabled={disabled || voiceBusy || pending || voiceSupport === 'unsupported'} onClick={() => openHomeConversation(true)}><Microphone size={23} /> Говорити з тренером</button><button type="button" className="home-coach-write" disabled={disabled} onClick={() => openHomeConversation(false)}>Написати тренеру <ArrowUpRight size={16} /></button>{isOpenAI && !(state.goals || []).some(goal => goal.status === 'active') && <button type="button" className="home-coach-write home-coach-intro-start" disabled={disabled} onClick={() => { void startScenario('intro'); }}>Знайомство за 2 хвилини <ArrowUpRight size={16} /></button>}</div>
     <p className="home-coach-hint">{disabled ? 'Спочатку віднови збереження даних, щоб продовжити розмову.' : voiceSupport === 'unsupported' ? 'Голос недоступний у цьому браузері або на пристрої. Можеш написати тренеру.' : 'Голос стане текстом. Перевір його перед надсиланням.'}</p>
     {draft.trim() && <p className="home-coach-draft">Твоя чернетка залишилася в розмові.</p>}
   </section>;

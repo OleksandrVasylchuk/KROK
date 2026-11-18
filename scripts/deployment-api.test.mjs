@@ -10,11 +10,12 @@ const TOKEN = 'Bearer qa.token.12345678901234567890';
 const MESSAGE = { messages: [{ role: 'user', text: 'Порадь невеликий крок.' }], tone: 'supportive' };
 const completion = () => new Response(JSON.stringify({ status: 'completed', output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Почни з однієї короткої прогулянки.' }] }] }));
 
-async function fixture(t, { env = {}, user = USER, authStatus = 200, upstream } = {}) {
+async function fixture(t, { env = {}, user = USER, authStatus = 200, upstream, rpc } = {}) {
   const calls = [];
   const handler = createDeploymentApi({ env: { ...ENV, ...env }, fetchImpl: async (url, options) => {
     calls.push({ url, options });
     if (url.endsWith('/auth/v1/user')) return new Response(JSON.stringify(user), { status: authStatus });
+    if (rpc && url.startsWith(`${ENV.SUPABASE_URL}/rest/v1/rpc/`)) return rpc(url.slice(`${ENV.SUPABASE_URL}/rest/v1/rpc/`.length), options);
     assert.equal(url, 'https://api.openai.com/v1/responses');
     return upstream ? upstream(options) : completion();
   } });
@@ -34,8 +35,11 @@ async function fixture(t, { env = {}, user = USER, authStatus = 200, upstream } 
       req.end(['GET', 'OPTIONS'].includes(method) ? undefined : raw ?? JSON.stringify(body));
     });
   }
-  return { request, port, calls, providerCalls: () => calls.filter(call => call.url.includes('api.openai.com')) };
+  return { request, port, calls, providerCalls: () => calls.filter(call => call.url.includes('api.openai.com')), usageCalls: () => calls.filter(call => call.url.includes('/rest/v1/')) };
 }
+const USAGE = { input_tokens: 640, output_tokens: 48, total_tokens: 688 };
+const completionWithUsage = () => new Response(JSON.stringify({ status: 'completed', usage: USAGE, output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Почни з однієї короткої прогулянки.' }] }] }));
+const usageRpc = (reserve = { allowed: true, user_requests_today: 1, user_daily_requests: 40 }, settle = { recorded: true }) => name => new Response(JSON.stringify(name === 'krok_ai_reserve' ? reserve : settle));
 
 test('deployment origins come only from exact trusted HTTPS configuration', () => {
   const policy = deploymentPolicy({ KROK_ALLOWED_ORIGINS: 'https://KROK.example.test/, https://other.example.test', VERCEL_URL: 'krok-build-team.vercel.app', VERCEL_PROJECT_PRODUCTION_URL: 'krok.example.test' });
@@ -143,6 +147,87 @@ test('missing hosted model key has a public-facing error and never calls OpenAI'
   assert.equal(response.data.error.code, 'not_configured');
   assert.equal(response.text.includes('SETUP-AI'), false);
   assert.equal(f.providerCalls().length, 0);
+});
+
+test('durable usage accounting stays off unless KROK_AI_USAGE is exactly enforce', async t => {
+  for (const KROK_AI_USAGE of [undefined, '', 'true', '1', 'ENFORCE', 'enforce ', 'off']) {
+    const f = await fixture(t, { env: { KROK_AI_USAGE }, upstream: completionWithUsage, rpc: usageRpc({ allowed: false, reason: 'paused' }) });
+    const response = await f.request();
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.data, { text: 'Почни з однієї короткої прогулянки.', model: 'gpt-6-luna' });
+    assert.equal(f.usageCalls().length, 0);
+    assert.equal(f.providerCalls().length, 1);
+  }
+});
+
+test('enforced usage reserves with the caller token before the model call and settles provider usage', async t => {
+  for (const [path, body, kind] of [['/api/coach', MESSAGE, 'chat'], ['/api/coach/actions', { ...MESSAGE, date: '2026-11-17', actionsConsent: false }, 'actions']]) {
+    const f = await fixture(t, { env: { KROK_AI_USAGE: 'enforce' }, rpc: usageRpc(), upstream: () => path === '/api/coach' ? completionWithUsage()
+      : new Response(JSON.stringify({ status: 'completed', usage: USAGE, output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: JSON.stringify({ text: 'Про яку звичку йдеться?', actions: [] }) }] }] })) });
+    const response = await f.request({ path, body });
+    assert.equal(response.status, 200);
+    assert.deepEqual(f.calls.map(call => call.url), [`${ENV.SUPABASE_URL}/auth/v1/user`, `${ENV.SUPABASE_URL}/rest/v1/rpc/krok_ai_reserve`, 'https://api.openai.com/v1/responses', `${ENV.SUPABASE_URL}/rest/v1/rpc/krok_ai_settle`]);
+    const [reserve, settle] = f.usageCalls();
+    for (const call of [reserve, settle]) {
+      assert.equal(call.options.method, 'POST');
+      assert.equal(call.options.redirect, 'error');
+      assert.deepEqual(call.options.headers, { apikey: ENV.SUPABASE_PUBLISHABLE_KEY, Authorization: TOKEN, 'Content-Type': 'application/json' });
+      assert.equal(JSON.stringify(call.options).includes(ENV.OPENAI_API_KEY), false);
+    }
+    assert.deepEqual(JSON.parse(reserve.options.body), { p_kind: kind });
+    assert.deepEqual(JSON.parse(settle.options.body), { p_input: 640, p_output: 48 });
+    assert.equal(f.providerCalls()[0].options.headers.Authorization, `Bearer ${ENV.OPENAI_API_KEY}`);
+    assert.equal(response.text.includes('qa.token'), false);
+  }
+});
+
+test('enforced usage denials and storage failures never reach OpenAI', async t => {
+  const denials = [['paused', 503, 'service_paused'], ['user_daily', 429, 'user_daily_limit'], ['user_monthly', 429, 'user_monthly_limit'], ['global_daily', 429, 'service_daily_limit'], ['global_monthly', 429, 'service_budget_reached'], ['global_budget', 429, 'service_budget_reached']];
+  for (const [reason, status, code] of denials) {
+    const f = await fixture(t, { env: { KROK_AI_USAGE: 'enforce' }, rpc: usageRpc({ allowed: false, reason }) });
+    for (const path of ['/api/coach', '/api/coach/actions']) {
+      const response = await f.request({ path, body: { ...MESSAGE, date: '2026-11-17', actionsConsent: false } });
+      assert.equal(response.status, status);
+      assert.equal(response.data.error.code, code);
+    }
+    assert.equal(f.usageCalls().length, 2);
+    assert.equal(f.usageCalls().every(call => call.url.endsWith('/krok_ai_reserve')), true);
+    assert.equal(f.providerCalls().length, 0);
+  }
+  for (const rpc of [
+    () => new Response(JSON.stringify({ code: 'PGRST202', message: 'function not found' }), { status: 404 }),
+    () => new Response(JSON.stringify({ message: 'JWT expired' }), { status: 401 }),
+    () => new Response('upstream error', { status: 500 }),
+    () => new Response('not json'),
+    () => new Response(JSON.stringify({ allowed: false, reason: 'unknown' })),
+    () => new Response(JSON.stringify({ allowed: 'true' })),
+    () => { throw new Error('network'); },
+  ]) {
+    const f = await fixture(t, { env: { KROK_AI_USAGE: 'enforce' }, rpc });
+    const response = await f.request();
+    assert.equal(response.status, 503);
+    assert.equal(response.data.error.code, 'usage_unavailable');
+    assert.equal(f.usageCalls().length, 1);
+    assert.equal(f.providerCalls().length, 0);
+  }
+});
+
+test('enforced usage keeps the beta gate first and a failed settle keeps the reply', async t => {
+  const outsider = await fixture(t, { env: { KROK_AI_USAGE: 'enforce' }, user: { ...USER, email: 'other@example.test' }, rpc: usageRpc() });
+  assert.equal((await outsider.request()).data.error.code, 'beta_access_required');
+  assert.equal(outsider.usageCalls().length + outsider.providerCalls().length, 0);
+  const anonymous = await fixture(t, { env: { KROK_AI_USAGE: 'enforce' }, rpc: usageRpc() });
+  assert.equal((await anonymous.request({ headers: { Authorization: '' } })).status, 401);
+  assert.equal((await anonymous.request({ raw: '{broken' })).status, 400);
+  assert.equal(anonymous.usageCalls().length + anonymous.providerCalls().length, 0);
+  const unsettled = await fixture(t, { env: { KROK_AI_USAGE: 'enforce' }, upstream: completionWithUsage, rpc: name => name === 'krok_ai_reserve' ? new Response(JSON.stringify({ allowed: true })) : new Response('down', { status: 500 }) });
+  const response = await unsettled.request();
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.data, { text: 'Почни з однієї короткої прогулянки.', model: 'gpt-6-luna' });
+  assert.equal(unsettled.usageCalls().length, 2);
+  const broken = await fixture(t, { env: { KROK_AI_USAGE: 'enforce', SUPABASE_PUBLISHABLE_KEY: 'sb_secret_never_use_as_public' }, rpc: usageRpc() });
+  assert.equal((await broken.request()).data.error.code, 'auth_configuration_error');
+  assert.equal(broken.calls.length, 0);
 });
 
 test('client cancellation aborts an in-flight provider request without retrying', async t => {

@@ -692,3 +692,136 @@ test('actions endpoint keeps shared security, rate, refusal and timeout boundari
   assert.equal((await limited.request({ path: '/api/coach/actions', body: actionRequest() })).status, 200);
   assert.equal((await limited.request()).data.error.code, 'rate_limit');
 });
+
+const SESSION = 'Bearer qa.session.12345678901234567890';
+const withUsage = (usage, body = { status: 'completed', output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Почнімо з одного невеликого кроку.' }] }] }, status = 200) => new Response(JSON.stringify({ ...body, usage }), { status });
+function usageGuard({ decide = () => ({ allowed: true }), settle = () => true } = {}) {
+  const reserved = [], settled = [];
+  return { reserved, settled, usage: {
+    reserve: async (authorization, kind) => { reserved.push({ authorization, kind }); return decide(); },
+    settle: async (authorization, usage) => { settled.push({ authorization, usage }); return settle(); },
+  } };
+}
+
+test('durable usage denials answer with honest codes and never start a provider request', async t => {
+  const cases = [
+    ['paused', 503, 'service_paused', undefined],
+    ['user_daily', 429, 'user_daily_limit', '3600'],
+    ['user_monthly', 429, 'user_monthly_limit', undefined],
+    ['global_daily', 429, 'service_daily_limit', '3600'],
+    ['global_monthly', 429, 'service_budget_reached', undefined],
+    ['global_budget', 429, 'service_budget_reached', undefined],
+  ];
+  for (const [reason, status, code, retryAfter] of cases) {
+    const guard = usageGuard({ decide: () => ({ allowed: false, reason }) });
+    const { request, calls } = await fixture(t, { usage: guard.usage, maxConcurrent: 1, now: () => Date.UTC(2026, 10, 18, 23, 0, 0) });
+    for (const [path, body] of [['/api/coach', undefined], ['/api/coach/plan', planRequest()], ['/api/coach/actions', actionRequest()]]) {
+      const response = await request({ path, ...(body ? { body } : {}), headers: { Authorization: SESSION } });
+      assert.equal(response.status, status, reason);
+      assert.equal(response.data.error.code, code);
+      assert.match(response.data.error.message, /ШІ/);
+      assert.match(response.data.error.message, /Квести, звички й цілі працюють без обмежень/);
+      assert.equal(response.headers['retry-after'], retryAfter);
+    }
+    assert.equal(guard.reserved.length, 3);
+    assert.equal(guard.settled.length, 0);
+    assert.equal(calls.length, 0);
+  }
+  const daily = await fixture(t, { usage: usageGuard({ decide: () => ({ allowed: false, reason: 'user_daily' }) }).usage });
+  assert.equal((await daily.request()).data.error.message, 'Ти вже використав сьогоднішню кількість звернень до ШІ-тренера. Квести, звички й цілі працюють без обмежень; нові звернення будуть доступні завтра.');
+});
+
+test('usage guard errors and unknown decisions fail closed before any provider request', async t => {
+  for (const decide of [
+    () => { throw new Error(`storage down ${TEST_KEY} ${SESSION}`); },
+    () => undefined,
+    () => null,
+    () => ({}),
+    () => ({ allowed: 'true' }),
+    () => ({ allowed: false }),
+    () => ({ allowed: false, reason: 'new_reason' }),
+    () => ({ allowed: false, reason: 'constructor' }),
+  ]) {
+    const guard = usageGuard({ decide });
+    const { request, calls } = await fixture(t, { usage: guard.usage, maxConcurrent: 1 });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const response = await request({ headers: { Authorization: SESSION } });
+      assert.equal(response.status, 503);
+      assert.equal(response.data.error.code, 'usage_unavailable');
+      assert.equal(response.data.error.message, 'Не вдалося перевірити ліміт звернень до ШІ. Спробуй пізніше.');
+      assert.equal(response.headers['retry-after'], undefined);
+      assert.ok(!response.text.includes(TEST_KEY) && !response.text.includes('qa.session'));
+    }
+    assert.equal(calls.length, 0);
+    assert.equal(guard.settled.length, 0);
+  }
+  for (const usage of [null, {}, { reserve: async () => ({ allowed: true }) }, { reserve: 'yes', settle: async () => true }]) assert.throws(() => createCoachApi({ usage }));
+});
+
+test('reservation follows validation, key and rate checks and carries the route kind and caller token', async t => {
+  let key = '';
+  const guard = usageGuard();
+  const { request, calls } = await fixture(t, { usage: guard.usage, rateLimit: 3, getApiKey: async () => key });
+  assert.equal((await request({ headers: { Authorization: SESSION } })).data.error.code, 'not_configured');
+  key = TEST_KEY;
+  assert.equal((await request({ body: { messages: [] }, headers: { Authorization: SESSION } })).status, 400);
+  assert.equal((await request({ raw: '{oops', headers: { Authorization: SESSION } })).status, 400);
+  assert.equal((await request({ path: '/api/coach/status', method: 'GET' })).status, 200);
+  assert.equal(guard.reserved.length, 0);
+  assert.equal(calls.length, 0);
+  assert.equal((await request({ headers: { Authorization: SESSION } })).status, 200);
+  assert.equal((await request({ path: '/api/coach/plan', body: planRequest(), headers: { Authorization: SESSION } })).status, 502, 'chat text is not a valid plan, yet the request was reserved');
+  assert.equal((await request({ path: '/api/coach/actions', body: actionRequest(), headers: { Authorization: SESSION } })).status, 502);
+  assert.deepEqual(guard.reserved, [{ authorization: SESSION, kind: 'chat' }, { authorization: SESSION, kind: 'plan' }, { authorization: SESSION, kind: 'actions' }]);
+  assert.equal(calls.length, 3);
+  assert.equal((await request({ headers: { Authorization: SESSION } })).data.error.code, 'rate_limit');
+  assert.equal(guard.reserved.length, 3, 'the in-memory limit rejects before a durable reservation is spent');
+  assert.equal(guard.settled.length, 0, 'replies without provider usage are not settled');
+});
+
+test('provider usage is settled before the reply for success, incomplete and error bodies', async t => {
+  const usage = { input_tokens: 812, output_tokens: 96, total_tokens: 908 };
+  let finished = 0;
+  const guard = usageGuard({ settle: async () => { await new Promise(resolve => setTimeout(resolve, 15)); finished += 1; return true; } });
+  const replies = [
+    [() => withUsage(usage), 200, undefined],
+    [() => withUsage(usage, { status: 'incomplete', output: [] }), 502, 'incomplete_response'],
+    [() => withUsage(usage, { status: 'failed', error: { code: 'server_error' } }), 502, 'provider_unavailable'],
+    [() => withUsage(usage, { error: { code: 'rate_limit_exceeded' } }, 429), 429, 'provider_rate_limit'],
+    [() => withUsage(usage, { status: 'completed', output: [] }), 502, 'empty_response'],
+  ];
+  let index = 0;
+  const { request, calls } = await fixture(t, { usage: guard.usage, fetchImpl: async (...args) => { calls.push(args); return replies[index][0](); } });
+  for (; index < replies.length; index += 1) {
+    const response = await request({ headers: { Authorization: SESSION } });
+    assert.equal(response.status, replies[index][1]);
+    assert.equal(response.data.error?.code, replies[index][2]);
+    assert.equal(finished, index + 1, 'accounting completes before the client is answered');
+    assert.deepEqual(guard.settled[index], { authorization: SESSION, usage });
+  }
+  assert.equal(calls.length, replies.length);
+  assert.equal(guard.settled.length, replies.length);
+  const none = usageGuard();
+  let reply = () => completion();
+  const plain = await fixture(t, { usage: none.usage, fetchImpl: async () => reply() });
+  assert.equal((await plain.request({ headers: { Authorization: SESSION } })).status, 200);
+  for (const value of [() => new Response('oops'), () => withUsage(null), () => withUsage('many'), () => withUsage([1, 2])]) {
+    reply = value;
+    await plain.request({ headers: { Authorization: SESSION } });
+  }
+  assert.equal(none.reserved.length, 5);
+  assert.equal(none.settled.length, 0);
+});
+
+test('a failing settle never changes the reply or blocks the next request', async t => {
+  for (const settle of [() => { throw new Error(TEST_KEY); }, () => Promise.reject(new Error(TEST_KEY)), () => false]) {
+    const guard = usageGuard({ settle });
+    const { request } = await fixture(t, { usage: guard.usage, maxConcurrent: 1, fetchImpl: async () => withUsage({ input_tokens: 5, output_tokens: 7 }) });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const response = await request({ headers: { Authorization: SESSION } });
+      assert.equal(response.status, 200);
+      assert.deepEqual(response.data, { text: 'Почнімо з одного невеликого кроку.', model: 'gpt-6-luna' });
+    }
+    assert.equal(guard.settled.length, 2);
+  }
+});

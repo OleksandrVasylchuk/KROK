@@ -88,6 +88,15 @@ export async function persistState(state) {
   if(!isDemo) return scopeWrite(key,adapter=>adapter.persistState(state));
   try { return await (await getDemoPersistence()).persistState(state); } catch { return false; }
 }
+/** Read-only copy of this device's local profile for an explicit, reviewed transfer into an account. */
+export async function readLocalProfile() {
+  if (isDemo || activeStorageKey === STORAGE_KEY) return null;
+  try {
+    const { Capacitor } = await import('@capacitor/core');
+    const raw = Capacitor.isNativePlatform() ? (await (await import('@capacitor/preferences')).Preferences.get({ key: STORAGE_KEY })).value : globalThis.localStorage.getItem(STORAGE_KEY);
+    return typeof raw === 'string' && raw ? realPersistence.validateBackup(raw) : null;
+  } catch { return null; }
+}
 export async function recoverPersistence(state) {
   const key=activeStorageKey;
   if(!isDemo) return scopeWrite(key,adapter=>adapter.recoverPersistence(state));

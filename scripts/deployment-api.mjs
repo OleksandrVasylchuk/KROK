@@ -1,5 +1,6 @@
 import { createAuthApi } from './auth-api.mjs';
 import { createCoachApi } from './coach-api.mjs';
+import { createUsageGuard } from './ai-usage.mjs';
 import { validateAuthConfig } from '../src/auth-core.js';
 
 const ROUTES = new Set(['/api/auth/config', '/api/coach', '/api/coach/status', '/api/coach/plan', '/api/coach/actions']);
@@ -45,15 +46,15 @@ function jsonError(res, status, code, message) {
 /** Node runtime only. No local files/DPAPI, account data storage, or provider calls at module load. */
 export function createDeploymentApi({ env = process.env, fetchImpl = globalThis.fetch, coachOptions = {} } = {}) {
   const policy = deploymentPolicy(env);
-  const auth = createAuthApi({
-    ...policy, requireAuth: true, fetchImpl,
-    getConfig: async () => validateAuthConfig({ configured: true, supabaseUrl: env.SUPABASE_URL, publishableKey: env.SUPABASE_PUBLISHABLE_KEY, googleEnabled: env.KROK_GOOGLE_AUTH === 'true' }),
-    allowUser: user => betaUserAllowed(user, env),
-  });
+  const getConfig = async () => validateAuthConfig({ configured: true, supabaseUrl: env.SUPABASE_URL, publishableKey: env.SUPABASE_PUBLISHABLE_KEY, googleEnabled: env.KROK_GOOGLE_AUTH === 'true' });
+  const auth = createAuthApi({ ...policy, requireAuth: true, fetchImpl, getConfig, allowUser: user => betaUserAllowed(user, env) });
+  // Durable per-user/global limits live in Supabase and are opt-in: supabase/migrations/*_ai_usage.sql must be applied first.
+  const usage = env.KROK_AI_USAGE === 'enforce' ? createUsageGuard({ getConfig, fetchImpl }) : undefined;
   // These in-memory limits are per warm function instance, not distributed user quotas.
   const coach = createCoachApi({
     ...coachOptions, ...policy, fetchImpl, timeoutMs: 45000, hosted: true,
     model: env.OPENAI_MODEL || 'gpt-6-luna', getApiKey: async () => env.OPENAI_API_KEY?.trim() || '',
+    ...(usage ? { usage } : {}),
   });
   return async (req, res) => {
     try {

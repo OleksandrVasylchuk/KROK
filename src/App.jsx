@@ -21,8 +21,9 @@ import DayCycle from './DayCycle.jsx';
 import AppearanceSettings, { useAppearance } from './AppearanceSettings.jsx';
 import ImpulseToday from './ImpulseToday.jsx';
 import { applyAppearance } from './appearance.js';
-import { planReminders } from './plan-reminders.js';
+import { planReminders, planActionEffect } from './plan-reminders.js';
 import PlanReminders from './PlanReminders.jsx';
+import CloudSyncPanel, { useCloudSync } from './CloudSyncPanel.jsx';
 
 const NAV = [
   { id: 'today', label: 'Мій день', Icon: House },
@@ -204,6 +205,11 @@ export default function App({ initialState, initialWarning }) {
   const stats = selectStats(state);
   const current = NAV.find(n => n.id === page);
   const writeBlocked = Boolean(storageWarning || externalChange || restoreBusy || saveFailed);
+  const writeBlockedRef = useRef(false);
+  writeBlockedRef.current = writeBlocked;
+  const planListener = useRef(null);
+  const cloud = useCloudSync({ scope: activeStorageKey, state, savedSnapshot, blocked: writeBlocked, adopt: restoreData, notify });
+  async function exportCopy() { const result = await exportBackup(nativeState.current.state); if (result.status === 'failed') notify(result.error || 'Не вдалося зберегти копію'); else if (result.status === 'downloaded') notify('Копію записів збережено у файл'); }
   useEffect(() => applyAppearance(), []);
   useEffect(() => { if (modal) window.dispatchEvent(new Event('krok:pause-coach')); }, [modal]);
   useEffect(() => {
@@ -222,7 +228,35 @@ export default function App({ initialState, initialWarning }) {
   useEffect(() => {
     if (isDemo) return undefined;
     let disposed = false, remove;
-    planReminders.listenNavigation(() => activeStorageKey, destination => { setModal(null); setPage(destination === 'habits' ? 'habits' : 'quests'); }).then(cleanup => { if (disposed) cleanup(); else remove = cleanup; }).catch(() => {});
+    // The durable copy of exactly the state on screen; waits briefly for a save in flight (cold start from a notification button).
+    const settledState = async () => {
+      for (let attempt = 0; attempt < 20 && !disposed; attempt++) {
+        if (writeBlockedRef.current || writeGuard.current || restoreGuard.current) return null;
+        const saved = durableState.current;
+        if (saved && saved.scope === activeStorageKey && saved.state === nativeState.current.state) return saved;
+        await new Promise(resolve => setTimeout(resolve, 150));
+      }
+      return null;
+    };
+    const answer = async info => {
+      if (writeBlockedRef.current || writeGuard.current || restoreGuard.current) { notify('Зараз зміни не зберігаються. Відміть справу у списку, коли запис відновиться.'); return; }
+      const effect = planActionEffect(nativeState.current.state, info, localDate());
+      if (effect.type === 'none') { if (effect.message) notify(effect.message); return; }
+      if (effect.type === 'dispatch') { dispatch(effect.action); notify(effect.message); return; }
+      const saved = await settledState();
+      if (disposed) return;
+      if (!saved) { notify('Не вдалося оновити нагадування: зміни ще не збережені. Повтори у «Нагадуваннях».'); return; }
+      try {
+        if (effect.type === 'snooze') await planReminders.snooze(saved.state, saved.scope, info.kind, info.id, info.date);
+        else await planReminders.skip(saved.state, saved.scope, info.kind, info.id, info.date);
+        if (!disposed) notify(effect.message);
+      } catch (error) { if (!disposed) notify(error.message || 'Не вдалося оновити нагадування.'); }
+    };
+    // Registered before the legacy daily listener: a button tapped while the app was closed is delivered to the first listener only.
+    planListener.current = planReminders.listenNavigation(() => activeStorageKey, (destination, info) => {
+      setModal(null); setPage(destination === 'habits' ? 'habits' : 'quests');
+      if (info && info.action !== 'open') answer(info);
+    }).then(cleanup => { if (disposed) cleanup(); else remove = cleanup; }).catch(() => {});
     return () => { disposed = true; remove?.(); };
   }, []);
   function notify(message) { setToast(message); clearTimeout(toastTimeout.current); toastTimeout.current = setTimeout(() => setToast(''), 3500); }
@@ -291,6 +325,7 @@ export default function App({ initialState, initialWarning }) {
         if (isActive) setDayTick(t => t + 1);
         else if (!restoreGuard.current) persistState(nativeState.current.state);
       }));
+      await planListener.current;
       const remove = await listenReminderNavigation(() => { setModal(null); setPage('quests'); });
       if (disposed) remove(); else cleanup.push(remove);
     }
@@ -304,6 +339,7 @@ export default function App({ initialState, initialWarning }) {
     <div className="sidebar-bottom"><div className="sidebar-quote"><span className="quote-rule" /><p>Не змагайся з іншими.<br />Перевершуй себе.</p><Mountains size={52} weight="thin" /></div><button className="nav-item settings" onClick={() => setModal('profile')}><GearSix size={21} weight="light" /><span>Налаштування</span></button><button className="sidebar-profile" onClick={() => setModal('profile')}><Avatar profile={state.profile} /><span><strong>{state.profile.name}</strong><small>Рівень {stats.level} · {ranks[Math.min(stats.level - 1, ranks.length - 1)]}</small></span><CaretRight size={16} /></button></div></aside>
     <div className="workspace"><header className="topbar"><div className="breadcrumb"><button className="icon-button mobile-menu" onClick={() => setMenuOpen(!menuOpen)} aria-expanded={menuOpen} aria-label="Відкрити меню"><List size={23} /></button><span>Мій простір</span><CaretRight size={13} /><strong>{current.label}</strong></div><div className="topbar-right"><button type="button" className="icon-button account-topbar" aria-label="Акаунт і реєстрація" onClick={() => setModal('account')}><ShieldCheck size={21} /></button><button type="button" className="icon-button theme-toggle" aria-label="Світла або темна тема" onClick={() => setModal('appearance')}><Sun size={20} /></button><span className="date-label">{new Date().toLocaleDateString('uk-UA', { day: 'numeric', month: 'long' })}</span><span className="topbar-divider" /><button className="icon-button" aria-label="Інформація про нагадування" onClick={() => setModal('reminders')}><Bell size={21} weight="light" /></button><button className="topbar-avatar" onClick={() => setModal('profile')} aria-label="Відкрити профіль"><Avatar profile={state.profile} /><CaretDown size={12} /></button></div></header>
     <main id="main" className="main-content"><PlatformStatus />{isDemo && <div className="demo-banner"><Compass size={19} /><div><strong>Демопрофіль Олексія</strong><p>Вигаданий приклад із місяцем історії. Можна змінювати все — особистий прогрес зберігається окремо.</p></div><button className="text-button" onClick={switchMode}>Мій профіль <ArrowRight size={15} /></button></div>}{(storageWarning || saveFailed) && <div role="alert" className="storage-warning">{storageWarning || 'Не вдалося зберегти зміни. Збережи копію своїх даних перед закриттям застосунку.'}<button className="text-button" onClick={() => setModal('profile')}>Відкрити профіль і копії даних <ArrowRight size={15} /></button></div>}
+    {cloud.available && ['conflict', 'error'].includes(cloud.status.phase) && modal !== 'account' && <div role="alert" className="storage-warning sync-banner">{cloud.status.phase === 'conflict' ? 'Записи на цьому пристрої та в хмарі відрізняються. Обери, яку версію залишити.' : cloud.status.message || 'Не вдалося синхронізувати записи. Локальні дані збережено.'}<button className="text-button" onClick={() => setModal('account')}>Відкрити синхронізацію <ArrowRight size={15} /></button></div>}
     {page === 'today' && <Today {...{ state, dispatch, stats, setPage, notify }} disabled={Boolean(storageWarning || externalChange || restoreBusy || saveFailed)} openModal={id => {if (id === 'quest') setQuestGoalId(null);setModal(id);}} />}
     {page === 'journey' && <LifeJourney {...{state, dispatch, notify}} disabled={Boolean(storageWarning || externalChange || restoreBusy || saveFailed)} onClose={() => setPage('today')} onApplied={() => setPage('today')} />}
     {page === 'quests' && <QuestsView {...{ state, dispatch, stats }} onAddQuest={() => {setQuestGoalId(null);setModal('quest');}} />}
@@ -313,10 +349,10 @@ export default function App({ initialState, initialWarning }) {
     {page === 'progress' && <ProgressView {...{ state, dispatch, stats }} />}
     {page === 'money' && <MoneyView {...{ state, dispatch }} />}
     {page === 'coach' && <CoachView {...{ state, dispatch }} disabled={Boolean(storageWarning || externalChange || restoreBusy || saveFailed)} onJourney={() => setPage('journey')} />}
-    <footer className="page-footer"><button className="text-button" onClick={() => setModal('install')}>{isNative ? 'КРОК ДЛЯ ANDROID' : 'ВСТАНОВИТИ КРОК'} <ArrowUpRight size={13} /></button><span><ShieldCheck size={13} weight="light" /> Прогрес на пристрої <i /> v0.7.1</span></footer></main></div>
+    <footer className="page-footer"><button className="text-button" onClick={() => setModal('install')}>{isNative ? 'КРОК ДЛЯ ANDROID' : 'ВСТАНОВИТИ КРОК'} <ArrowUpRight size={13} /></button><span><ShieldCheck size={13} weight="light" /> {cloud.status.enabled ? 'Прогрес на пристрої та в акаунті' : 'Прогрес на пристрої'} <i /> v0.8.0</span></footer></main></div>
     <nav className="mobile-tabs" aria-label="Швидка навігація">{['today','quests','habits','money'].map(id => {const {label,Icon}=NAV.find(n => n.id===id);return <button key={id} aria-current={page === id ? 'page' : undefined} onClick={() => setPage(id)}><Icon size={23} weight={page === id ? 'fill' : 'light'} /><span>{id==='today'?'Сьогодні':label}</span></button>;})}<button aria-label="Усі розділи" aria-expanded={menuOpen} onClick={() => setMenuOpen(!menuOpen)} aria-current={!['today','quests','habits','money'].includes(page)?'page':undefined}><List size={23}/><span>Ще</span></button></nav>
     {modal === 'profile' && <Modal title="Почнемо з тебе." subtitle="Власна ціль. Власний темп. Власний шлях." canClose={!restoreBusy} onClose={() => { if (!restoreGuard.current) setModal(null); }}><div className="settings-links"><button type="button" className="button button-ghost" onClick={() => setModal('account')}><ShieldCheck size={18} /> Акаунт і реєстрація</button><button type="button" className="button button-ghost" onClick={() => setModal('memory')}><Sparkle size={18} /> Пам’ять тренера</button><button type="button" className="button button-ghost" onClick={() => setModal('appearance')}><Sun size={18} /> Світла й темна тема</button></div><ProfileForm {...{ state, dispatch, notify }} disabled={restoreBusy} onClose={() => setModal(null)} /><div className="mode-switch"><Compass size={24} /><div><strong>{isDemo ? 'Готовий до власного маршруту?' : 'Подивись, як це працює.'}</strong><p>{isDemo ? 'Повернися до особистого профілю. Зміни демоприкладу залишаться в окремому сховищі.' : 'Олексій уже місяць веде звички, цілі й витрати. Це вигаданий приклад, який можна спробувати.'}</p><button disabled={restoreBusy} className="button button-ghost" onClick={switchMode}>{isDemo ? 'Відкрити мій профіль' : 'Відкрити демопрофіль'} <ArrowRight size={16} /></button></div></div><DataTransfer state={state} blocked={Boolean(storageWarning)} notify={notify} onRestore={restoreData} /><button disabled={restoreBusy} className="text-button install-profile-link" onClick={() => setModal('install')}>{isNative ? 'Про застосунок' : 'Встановити КРОК на пристрій'} <ArrowUpRight size={16} /></button></Modal>}
-    {modal === 'account' && <Modal title="Твій акаунт КРОК" subtitle="Google або електронна пошта." onClose={() => setModal(null)}><AccountPanel disabled={writeBlocked || savedSnapshot !== state} /></Modal>}
+    {modal === 'account' && <Modal title="Твій акаунт КРОК" subtitle="Google або електронна пошта." onClose={() => setModal(null)}><AccountPanel disabled={writeBlocked || savedSnapshot !== state} cloud={cloud.available} />{cloud.available && <CloudSyncPanel cloud={cloud} state={state} disabled={writeBlocked || savedSnapshot !== state} onExport={exportCopy} onTransfer={async local => { const moved = await restoreData(local); if (moved) notify('Записи локального профілю скопійовано в акаунт'); return moved; }} />}</Modal>}
     {modal === 'memory' && <Modal title="Що тренер знає про тебе" subtitle="Збережені факти та дозволи на контекст." onClose={() => setModal(null)}><CoachMemory {...{state,dispatch}} disabled={writeBlocked} /></Modal>}
     {modal === 'appearance' && <Modal title="Твій КРОК. Твої кольори." subtitle="Обери світлу, темну або системну тему." onClose={() => setModal(null)}><AppearanceSettings /></Modal>}
     {modal === 'quest' && <Modal title="Ще одна маленька перемога." subtitle="Обери дію, яку реально виконати сьогодні." onClose={() => setModal(null)}><QuestForm state={state} goalId={questGoalId} dispatch={dispatch} notify={notify} onClose={() => setModal(null)} /></Modal>}
