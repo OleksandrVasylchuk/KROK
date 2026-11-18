@@ -123,7 +123,7 @@ test('backup migration preserves receipts and consent is strict without silently
   legacy.schemaRevision = 3;
   delete legacy.coachProposals; delete legacy.profile.coachActionsConsent;
   const restored = validateBackup(JSON.stringify(legacy));
-  assert.equal(restored.schemaRevision, 5);
+  assert.equal(restored.schemaRevision, 6);
   assert.deepEqual(restored.coachProposals, []);
   assert.equal(restored.profile.coachActionsConsent, false);
   assert.equal(reducer(restored, { type: 'UPDATE_PROFILE', profile: { coachActionsConsent: 'true' } }).profile.coachActionsConsent, false);

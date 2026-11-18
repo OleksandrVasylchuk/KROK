@@ -1,23 +1,25 @@
 import { useEffect, useRef, useState } from 'react';
 import { ArrowRight, CheckCircle, Clock, X } from '@phosphor-icons/react';
 import { CATEGORIES, localDate } from './model.js';
+import { QUEST_TIERS } from './catalog.js';
 import { checkCoachProposal } from './coach-actions.js';
 import { CategoryIcon, recurrenceLabel } from './CollectionDialog.jsx';
 import './coach-actions.css';
 
-const labels = { create_quest: 'Новий квест', create_habit: 'Нова звичка', create_goal: 'Нова ціль', complete_quest: 'Виконання квесту', set_habit_count: 'Прогрес звички', set_goal_progress: 'Прогрес цілі', create_memory:'Запам’ятати факт', update_memory:'Виправити пам’ять', delete_memory:'Видалити факт із пам’яті', record_expense:'Записати витрату', update_quest:'Змінити квест', set_checkin:'Зберегти підсумок дня' };
+const labels = { create_quest: 'Новий квест', create_habit: 'Нова звичка', create_goal: 'Нова ціль', complete_quest: 'Виконання квесту', set_habit_count: 'Прогрес звички', set_goal_progress: 'Прогрес цілі', create_memory:'Запам’ятати факт', update_memory:'Виправити пам’ять', delete_memory:'Видалити факт із пам’яті', record_expense:'Записати витрату', update_quest:'Змінити квест', set_checkin:'Зберегти підсумок дня', archive_quest:'Прибрати квест', archive_habit:'Прибрати звичку' };
 const timeOfDay = { any: 'У зручний час', morning: 'Вранці', day: 'Вдень', evening: 'Увечері' };
 
 function ActionCard({ action, state }) {
-  const existing = ['complete_quest','update_quest'].includes(action.type) ? state.quests.find(item => item.id === action.id)
-    : action.type === 'set_habit_count' ? state.habits.find(item => item.id === action.id)
+  const existing = ['complete_quest','update_quest','archive_quest'].includes(action.type) ? state.quests.find(item => item.id === action.id)
+    : ['set_habit_count','archive_habit'].includes(action.type) ? state.habits.find(item => item.id === action.id)
       : action.type === 'set_goal_progress' ? state.goals?.find(item => item.id === action.id)
         : ['update_memory','delete_memory'].includes(action.type) ? state.coachMemory?.find(item=>item.id===action.id) : null;
   const title = action.title || action.text || existing?.title || existing?.text || (action.type === 'set_checkin' ? `Твій день · ${action.date}` : 'Запис більше недоступний');
   const category = action.type === 'record_expense' ? 'money' : action.category || existing?.category;
   const categoryLabel = CATEGORIES.find(item => item.id === category)?.shortLabel;
   return <article className="coach-action-card"><div className="coach-action-card-top"><span>{labels[action.type] || 'Пропонована дія'}</span>{categoryLabel && <span><CategoryIcon category={category} size={15} />{categoryLabel}</span>}</div><h4>{title}</h4>{action.description && <p>{action.description}</p>}<div className="coach-action-meta">
-    {action.type === 'create_quest' && <><span><Clock size={14} />{action.minutes} хв</span><span>{recurrenceLabel(action)}</span>{(action.goalId || action.goalRef) && <span>Пов’язаний із ціллю</span>}</>}
+    {action.type === 'create_quest' && <><span><Clock size={14} />{action.minutes} хв</span><span>{recurrenceLabel(action)}</span>{action.tier && <span>{QUEST_TIERS.find(item => item.id === action.tier)?.label}</span>}{action.timeOfDay && action.timeOfDay !== 'any' && <span>{timeOfDay[action.timeOfDay]}</span>}{(action.goalId || action.goalRef) && <span>Пов’язаний із ціллю</span>}</>}
+    {['archive_quest','archive_habit'].includes(action.type) && <span>Перейде в архів: зникне з розпорядку й нагадувань. Історія та зароблений досвід збережуться; повернути можна вручну.</span>}
     {action.type === 'create_habit' && <><span>{action.target} {action.unit}</span><span>{timeOfDay[action.timeOfDay]}</span><span>{recurrenceLabel(action)}</span></>}
     {action.type === 'create_goal' && <><span>Ціль: {action.target} {action.unit}</span>{action.deadline && <span>До {action.deadline}</span>}</>}
     {action.type === 'complete_quest' && <span>Позначити виконаним · {action.date}</span>}

@@ -342,6 +342,8 @@ export default function CoachView({ state, dispatch, onJourney, disabled = false
   function completeScenario(result) {
     const patch = scenarioProfilePatch(result.current.id, result.answers, stateRef.current.profile);
     if (patch) dispatch({ type: 'UPDATE_PROFILE', profile: patch });
+    // The next meeting is counted from the moment this one is sent.
+    if (result.current.id === 'weekly') dispatch({ type: 'COMPLETE_WEEKLY_MEETING' });
     changeScenario(null);
     updateDraft(result.current.savedDraft || '');
   }
@@ -558,6 +560,7 @@ export default function CoachView({ state, dispatch, onJourney, disabled = false
             {!scenarioQuestion.required && <button type="button" className="coach-scenario-link" disabled={controlsDisabled || talkActive} onClick={() => advanceScenario({ skip: true })}>Пропустити</button>}
             <button type="button" className="button button-primary coach-scenario-next" disabled={controlsDisabled || talkActive || (scenarioQuestion.required && !draft.trim())} onClick={() => advanceScenario()}>{scenarioLast ? scenarioDefinition.sendLabel : 'Далі'}</button>
           </div>
+          {scenarioDefinition.needsRecords && <label className="coach-scenario-consent"><input type="checkbox" checked={actionConsent} disabled={controlsDisabled} onChange={event => dispatch({ type: 'UPDATE_PROFILE', profile: { coachActionsConsent: event.target.checked } })} /><span>Дозволити тренеру бачити мої квести, звички й підсумок тижня. Без цього він спиратиметься лише на мої слова й не зможе прибрати чи змінити наявні справи.</span></label>}
           {scenarioError && <p className="coach-voice-error" role="alert">{scenarioError}</p>}
           <p className="coach-scenario-note">{scenarioLast ? 'Після цієї відповіді тренер отримає твої слова одним запитом і запропонує зміни. Вони застосуються лише після твого підтвердження.' : 'Відповідь можна написати або надиктувати нижче. Запитання ставить сам застосунок — запит до ШІ буде один, наприкінці.'}</p>
         </section>}
@@ -586,7 +589,7 @@ export default function CoachView({ state, dispatch, onJourney, disabled = false
 
   if (isHome && !homeOpen) return <section className="home-coach-entry" aria-label="Тренер на головній">
     <div className="home-coach-intro"><span className="eyebrow"><Sparkle size={15} /> ТВІЙ ТРЕНЕР ПОРУЧ</span><h2>Почни з розмови.</h2><p>Розкажи, що хочеш змінити. Разом перетворимо це на посильні квести, звички й цілі.</p></div>
-    <div className="home-coach-actions"><button ref={homeButtonRef} type="button" className="button button-primary home-coach-speak" disabled={disabled || voiceBusy || pending || voiceSupport === 'unsupported'} onClick={() => openHomeConversation(true)}><Microphone size={23} /> Говорити з тренером</button><button type="button" className="home-coach-write" disabled={disabled} onClick={() => openHomeConversation(false)}>Написати тренеру <ArrowUpRight size={16} /></button>{isOpenAI && !(state.goals || []).some(goal => goal.status === 'active') && <button type="button" className="home-coach-write home-coach-intro-start" disabled={disabled} onClick={() => { void startScenario('intro'); }}>Знайомство за 2 хвилини <ArrowUpRight size={16} /></button>}</div>
+    <div className="home-coach-actions"><button ref={homeButtonRef} type="button" className="button button-primary home-coach-speak" disabled={disabled || voiceBusy || pending || voiceSupport === 'unsupported'} onClick={() => openHomeConversation(true)}><Microphone size={23} /> Говорити з тренером</button><button type="button" className="home-coach-write" disabled={disabled} onClick={() => openHomeConversation(false)}>Написати тренеру <ArrowUpRight size={16} /></button>{isOpenAI && !state.profile.start && !(state.goals || []).some(goal => goal.status === 'active') && <button type="button" className="home-coach-write home-coach-intro-start" disabled={disabled} onClick={() => { void startScenario('intro'); }}>Знайомство за 2 хвилини <ArrowUpRight size={16} /></button>}</div>
     <p className="home-coach-hint">{disabled ? 'Спочатку віднови збереження даних, щоб продовжити розмову.' : voiceSupport === 'unsupported' ? 'Голос недоступний у цьому браузері або на пристрої. Можеш написати тренеру.' : 'Голос стане текстом. Перевір його перед надсиланням.'}</p>
     {draft.trim() && <p className="home-coach-draft">Твоя чернетка залишилася в розмові.</p>}
   </section>;

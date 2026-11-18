@@ -1,4 +1,4 @@
-import { CATEGORIES } from './catalog.js';
+import { CATEGORIES, QUEST_TIERS, tierXp } from './catalog.js';
 import { COACH_MEMORY_LIMIT, containsMemorySecret } from './coach-personal.js';
 
 export const COACH_ACTION_LIMIT = 5;
@@ -36,7 +36,13 @@ const actionKeys = {
   record_expense: ['type', 'ref', 'title', 'amount', 'category', 'date', 'account', 'note'],
   update_quest: ['type', 'ref', 'id', 'title', 'description', 'minutes', 'frequency', 'weekdays', 'scheduledDate'],
   set_checkin: ['type', 'ref', 'date', 'mood', 'energy', 'note'],
+  archive_quest: ['type', 'ref', 'id'],
+  archive_habit: ['type', 'ref', 'id'],
 };
+// Since schema 6 a proposed quest may carry its level and part of day; earlier saved proposals stay valid.
+const questExtras = ['tier', 'timeOfDay'];
+const tiers = new Set(QUEST_TIERS.map(item => item.id));
+const shaped = action => exact(action, actionKeys[action.type]) || (action.type === 'create_quest' && exact(action, [...actionKeys.create_quest, ...questExtras]));
 const createsRecord = type => ['create_quest', 'create_habit', 'create_goal', 'create_memory', 'record_expense'].includes(type);
 const memoryType = type => ['create_memory', 'update_memory', 'delete_memory'].includes(type);
 const actionTargetId = (action, proposalId, index) => createsRecord(action.type) ? `coach-${proposalId}-${index}` : action.type === 'set_checkin' ? `checkin-${action.date}` : action.id;
@@ -45,22 +51,22 @@ function validateContent(value, { date = todayDate(), context, personalContext, 
   if (!validDate(date) || !exact(value, ['text', 'actions']) || !text(value.text, 6000) || !Array.isArray(value.actions) || value.actions.length > COACH_ACTION_LIMIT) return fail('invalid_actions', 'Відповідь тренера має неправильний формат. Спробуй ще раз.');
   const refs = new Set(), changes = new Set(), titles = new Set();
   for (const action of value.actions) {
-    if (!object(action) || typeof action.type !== 'string' || !Object.hasOwn(actionKeys, action.type) || !exact(action, actionKeys[action.type]) || !id(action.ref, 40) || refs.has(action.ref)) return fail('invalid_action', 'Тренер запропонував некоректну або повторну дію. Нічого не змінено.');
+    if (!object(action) || typeof action.type !== 'string' || !Object.hasOwn(actionKeys, action.type) || !shaped(action) || !id(action.ref, 40) || refs.has(action.ref)) return fail('invalid_action', 'Тренер запропонував некоректну або повторну дію. Нічого не змінено.');
     refs.add(action.ref);
     if (['create_quest','create_habit','create_goal'].includes(action.type)) {
       if (!text(action.title, action.type === 'create_habit' ? 80 : 100) || !categories.has(action.category)) return fail('invalid_record', 'Перевір назву та сферу запропонованої дії.');
       const key = `${action.type}:${titleKey(action.title)}`;
       if (titles.has(key)) return fail('duplicate_action', 'У пропозиції повторюється один і той самий запис.');
       titles.add(key);
-    } else if (['complete_quest','set_habit_count','set_goal_progress','update_quest','update_memory','delete_memory'].includes(action.type)) {
+    } else if (['complete_quest','set_habit_count','set_goal_progress','update_quest','update_memory','delete_memory','archive_quest','archive_habit'].includes(action.type)) {
       if (!id(action.id)) return fail('invalid_id', 'Не вдалося визначити запис для зміни.');
-      const key = `${memoryType(action.type) ? 'memory' : ['complete_quest','update_quest'].includes(action.type) ? 'quest' : action.type}:${action.id}`;
+      const key = `${memoryType(action.type) ? 'memory' : ['complete_quest','update_quest','archive_quest'].includes(action.type) ? 'quest' : ['set_habit_count','archive_habit'].includes(action.type) ? 'habit' : action.type}:${action.id}`;
       if (changes.has(key)) return fail('duplicate_action', 'Один запис не можна змінити двічі в одній пропозиції.');
       changes.add(key);
       if (['complete_quest','set_habit_count'].includes(action.type) && action.date !== date) return fail('invalid_date', 'Відмітити прогрес через тренера можна тільки за сьогодні.');
     }
     if (action.type === 'create_quest') {
-      if (!text(action.description, 400, false) || !integer(action.minutes, 1, 180) || !['daily', 'weekdays', 'once'].includes(action.frequency) || !validWeekdays(action.weekdays) || (action.frequency === 'weekdays' && !action.weekdays.length) || (action.frequency === 'once' ? !validDate(action.scheduledDate) || action.scheduledDate < date : action.scheduledDate !== '') || (action.goalId !== null && !id(action.goalId)) || (action.goalRef !== null && !id(action.goalRef, 40)) || (action.goalId !== null && action.goalRef !== null)) return fail('invalid_quest', 'У квесті некоректні тривалість, розклад або зв’язок із ціллю.');
+      if (!text(action.description, 400, false) || !integer(action.minutes, 1, 180) || !['daily', 'weekdays', 'once'].includes(action.frequency) || !validWeekdays(action.weekdays) || (action.frequency === 'weekdays' && !action.weekdays.length) || (action.frequency === 'once' ? !validDate(action.scheduledDate) || action.scheduledDate < date : action.scheduledDate !== '') || (action.goalId !== null && !id(action.goalId)) || (action.goalRef !== null && !id(action.goalRef, 40)) || (action.goalId !== null && action.goalRef !== null) || (Object.hasOwn(action, 'tier') && (!tiers.has(action.tier) || !['any', 'morning', 'day', 'evening'].includes(action.timeOfDay)))) return fail('invalid_quest', 'У квесті некоректні тривалість, розклад, рівень або зв’язок із ціллю.');
     } else if (action.type === 'create_habit') {
       if (!icons.has(action.icon) || !integer(action.target, 1, 10000) || !text(action.unit, 30) || !['any', 'morning', 'day', 'evening'].includes(action.timeOfDay) || !['daily', 'weekdays'].includes(action.frequency) || !validWeekdays(action.weekdays) || (action.frequency === 'weekdays' && !action.weekdays.length)) return fail('invalid_habit', 'У звичці некоректні ціль, одиниці або розклад.');
     } else if (action.type === 'create_goal') {
@@ -88,7 +94,7 @@ function validateContent(value, { date = todayDate(), context, personalContext, 
   for (const action of value.actions) {
     if (action.type === 'create_quest' && action.goalRef !== null && !value.actions.some(other => other.type === 'create_goal' && other.ref === action.goalRef)) return fail('unknown_goal_ref', 'Квест посилається на ціль, якої немає в цій пропозиції.');
     if (structuralOnly) continue;
-    const needsContext = ['complete_quest','set_habit_count','set_goal_progress','update_quest'].includes(action.type) || (action.type === 'create_quest' && action.goalId !== null);
+    const needsContext = ['complete_quest','set_habit_count','set_goal_progress','update_quest','archive_quest','archive_habit'].includes(action.type) || (action.type === 'create_quest' && action.goalId !== null);
     if (needsContext && (!object(context) || context.date !== date || !['quests', 'habits', 'goals'].every(key => Array.isArray(context[key])))) return fail('context_required', 'Щоб змінити наявний запис, дозволь тренеру бачити квести, звички й прогрес.');
     if (action.type === 'create_quest' && action.goalId !== null && !context.goals?.some(goal => goal.id === action.goalId)) return fail('unknown_goal', 'Цю ціль більше не знайдено. Онови пропозицію.');
     if (action.type === 'complete_quest' && !context.quests?.some(quest => quest.id === action.id && quest.dueToday !== false)) return fail('quest_not_due', 'Квест не знайдено серед доступних на сьогодні.');
@@ -96,6 +102,8 @@ function validateContent(value, { date = todayDate(), context, personalContext, 
       const quest = context.quests?.find(item => item.id === action.id);
       if (!quest || quest.completed || quest.hasCompletions) return fail('quest_update_unavailable','Через тренера можна змінювати лише активний квест, який ще не має виконань. Історію збережено.');
     }
+    if (action.type === 'archive_quest' && !context.quests?.some(quest => quest.id === action.id)) return fail('quest_archive_unavailable', 'Цей квест уже в архіві або недоступний для зміни сьогодні.');
+    if (action.type === 'archive_habit' && !context.habits?.some(habit => habit.id === action.id)) return fail('habit_archive_unavailable', 'Ця звичка вже в архіві або її не знайдено.');
     if (['update_memory','delete_memory'].includes(action.type) && (personalContext?.memoryConsent !== true || !personalContext.memory?.some(item => item.id === action.id))) return fail('memory_context_required','Щоб змінити або видалити факт, дозволь доступ до пам’яті або зміни його вручну.');
     if (action.type === 'set_habit_count') {
       const habit = context.habits?.find(item => item.id === action.id);
@@ -195,8 +203,8 @@ export function checkCoachProposal(state, proposal, { today = todayDate() } = {}
     if (type === 'create_goal') return { type: 'ADD_GOAL', goal: { ...fields, id: appliedIds[index], current: 0 } };
     if (type === 'create_habit') return { type: 'ADD_HABIT', habit: { ...fields, id: appliedIds[index] } };
     if (type === 'create_quest') {
-      const { goalRef, ...quest } = fields;
-      return { type: 'ADD_QUEST', quest: { ...quest, id: appliedIds[index], xp: 30, goalId: goalRef === null ? quest.goalId : goalRefs.get(goalRef) } };
+      const { goalRef, tier, ...quest } = fields;
+      return { type: 'ADD_QUEST', quest: { ...quest, id: appliedIds[index], xp: tier ? tierXp(tier) : 30, goalId: goalRef === null ? quest.goalId : goalRefs.get(goalRef) } };
     }
     if (type === 'complete_quest') return { type: 'SET_QUEST_COMPLETED', id: action.id, date: action.date };
     if (type === 'set_habit_count') return { type: 'SET_HABIT_COUNT', id: action.id, date: action.date, value: action.value };
@@ -205,6 +213,8 @@ export function checkCoachProposal(state, proposal, { today = todayDate() } = {}
     if (type === 'delete_memory') return { type: 'DELETE_COACH_MEMORY', id: action.id };
     if (type === 'record_expense') return { type: 'ADD_EXPENSE', expense: { ...fields, id: appliedIds[index], type: 'expense' } };
     if (type === 'update_quest') { const { id, ...quest } = fields; return { type: 'UPDATE_QUEST', id, quest }; }
+    if (type === 'archive_quest') return { type: 'ARCHIVE_QUEST', id: action.id };
+    if (type === 'archive_habit') return { type: 'ARCHIVE_HABIT', id: action.id };
     if (type === 'set_checkin') return { type: 'SET_CHECKIN', date: action.date, checkIn: { mood: action.mood, energy: action.energy, note: action.note } };
     return { type: 'SET_GOAL_PROGRESS', id: action.id, value: action.value };
   });

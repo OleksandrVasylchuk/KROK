@@ -131,7 +131,7 @@ test('memory, journal and expense edits stale a pending batch; malformed memory 
   ]) assert.equal(checkCoachProposal(reducer(state,operation),pending,{today}).error.code,'stale_proposal');
   for(const corrupt of [s=>s.coachMemory.push({...s.coachMemory[0]}),s=>s.coachMemory[0].text='password: abc',s=>s.coachMemory[0].updatedAt='2199-01-01',s=>s.profile.coachMemoryConsent='true',s=>s.profile.coachJournalConsent=1]) { const bad=structuredClone(state);corrupt(bad);assert.throws(()=>validateBackup(JSON.stringify(bad))); }
   const old=structuredClone(state);delete old.coachMemory;delete old.profile.coachMemoryConsent;delete old.profile.coachJournalConsent;old.schemaRevision=4;
-  const restored=validateBackup(JSON.stringify(old));assert.equal(restored.schemaRevision,5);assert.deepEqual(restored.coachMemory,[]);assert.equal(restored.profile.coachMemoryConsent,false);
+  const restored=validateBackup(JSON.stringify(old));assert.equal(restored.schemaRevision,6);assert.deepEqual(restored.coachMemory,[]);assert.equal(restored.profile.coachMemoryConsent,false);
   assert.equal(restoreState(state).coachMemory[0].text,state.coachMemory[0].text);
 });
 

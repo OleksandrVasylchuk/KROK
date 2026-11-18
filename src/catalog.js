@@ -22,7 +22,7 @@ export const FINANCE_CATEGORIES = [
   ['other', 'Інше', '#a8aaa6', 'other'],
 ].map(([id, label, color, icon]) => ({ id, label, color, icon }));
 
-const quest = (id, title, category, xp, minutes, description, extra = {}) => ({ id, title, category, xp, minutes, description, attribute: CATEGORIES.find(item => item.id === category).attribute, frequency: 'daily', weekdays: [1, 2, 3, 4, 5], scheduledDate: '', archived: false, goalId: null, ...extra });
+const quest = (id, title, category, xp, minutes, description, extra = {}) => ({ id, title, category, xp, minutes, description, attribute: CATEGORIES.find(item => item.id === category).attribute, frequency: 'daily', weekdays: [1, 2, 3, 4, 5], scheduledDate: '', archived: false, goalId: null, timeOfDay: 'any', ...extra });
 export const QUEST_TEMPLATES = [
   quest('tpl-strength', 'Знайоме тренування у своєму темпі', 'body', 50, 25, 'Обери звичне комфортне тренування та залиш час на відпочинок.', { frequency: 'weekdays', weekdays: [1, 3, 5] }),
   quest('tpl-walk', 'Прогулянка без поспіху', 'body', 25, 20, 'Пройдися знайомим маршрутом і зверни увагу на те, що навколо.', { attribute: 'endurance' }),
@@ -72,4 +72,16 @@ export const HABIT_TEMPLATES = [
   habit('ht-desk', 'Чистий робочий стіл', 'home', 'home', 1, 'раз', 'evening'),
   habit('ht-tidy', 'Прибрати одну річ на місце', 'home', 'home', 3, 'речі'),
   habit('ht-create', 'Час для свого захоплення', 'creativity', 'creative', 1, 'сесія', 'evening'),
+];
+
+// A quest's level is its reward band, so earned XP and the level can never disagree.
+export const QUEST_TIERS = [
+  { id: 'common', label: 'Звичайний', xp: 20, hint: 'Маленька щоденна дія' },
+  { id: 'epic', label: 'Епічний', xp: 60, hint: 'Потребує часу й зусиль' },
+  { id: 'legendary', label: 'Легендарний', xp: 130, hint: 'Виклик на цілий день' },
+];
+export const questTier = xp => xp >= 100 ? 'legendary' : xp >= 50 ? 'epic' : 'common';
+export const tierXp = tier => (QUEST_TIERS.find(item => item.id === tier) || QUEST_TIERS[0]).xp;
+export const DAY_SLOTS = [
+  { id: 'morning', label: 'Ранок' }, { id: 'day', label: 'День' }, { id: 'evening', label: 'Вечір' }, { id: 'any', label: 'Будь-коли' },
 ];

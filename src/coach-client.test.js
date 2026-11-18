@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createInitialState, reducer, restoreState } from './model.js';
 import { buildCoachPayload, buildDailyPlanPayload, buildCoachActionPayload, coachHistory, coachApiBase, createCoachClient, COACH_HISTORY_CHAR_LIMIT, EMULATOR_COACH_ORIGIN } from './coach-client.js';
 import { normalizeLifeProfile } from './life-profile.js';
+import { buildStartRequest } from './start-plan.js';
 
 const user = text => ({ role: 'user', text, source: 'openai' });
 const assistant = text => ({ role: 'assistant', text, source: 'openai' });
@@ -340,4 +341,68 @@ test('native actions transport preserves clarification, strict outputs, error an
   await assert.rejects(client.act(payload), { code: 'invalid_actions' });
   const controller = new AbortController(); controller.abort();
   await assert.rejects(client.act(payload, { signal: controller.signal }), { name: 'AbortError' });
+});
+
+const startAnswers = () => ({ name: 'Олена', change: 'Мати більше енергії та кинути курити', focus: ['body', 'sleep'], minutes: 30, slots: ['morning', 'evening'], level: 'low', obstacles: ['Втома'], quit: 'куріння' });
+const startStep = (title, minutes, timeOfDay = 'morning', tier = 'common', category = 'body') => ({ title, description: 'Зроби це у своєму темпі.', category, minutes, timeOfDay, tier });
+// 30 minutes a day: light may spend 23, balanced 35, intense 50; the day-long challenge spends nothing.
+const startResult = () => ({ summary: 'Олено, ось три варіанти на пів години на день.', variants: [
+  { id: 'light', title: 'Легкий старт', note: 'Для дня, коли мало сил.', items: [startStep('Склянка води після пробудження', 2), startStep('10 хвилин ходьби', 10)] },
+  { id: 'balanced', title: 'Збалансований', note: 'Маленькі кроки й один виклик.', items: [startStep('Склянка води після пробудження', 2), startStep('10 хвилин ходьби', 10), startStep('Лягти до 23:00', 5, 'evening', 'common', 'sleep'), startStep('День без куріння', 5, 'any', 'legendary', 'mind')] },
+  { id: 'intense', title: 'Насичений', note: 'Коли є сили на більше.', items: [startStep('Склянка води після пробудження', 2), startStep('10 хвилин ходьби', 10), startStep('Легке тренування вдома', 20, 'evening', 'epic'), startStep('День без куріння', 5, 'any', 'legendary', 'mind')] },
+] });
+const startPayload = () => buildStartRequest(startAnswers(), { date: '2026-11-18', tone: 'buddy', habits: [{ title: 'Читання' }, { title: 'PRIVATE_ARCHIVED', archived: true }] });
+
+test('browser start transport requires consent, sends to the start route and returns the validated variants', async () => {
+  const calls = [];
+  const client = createCoachClient({ isNative: false, fetch: async (url, options) => {
+    calls.push({ url, options });
+    return { status: 200, json: async () => ({ plan: startResult(), model: 'gpt-6-luna' }) };
+  } });
+  const payload = startPayload();
+  assert.deepEqual(payload, { answers: startAnswers(), date: '2026-11-18', tone: 'buddy', consent: true, existingHabits: ['Читання'] });
+  assert.deepEqual(await client.startPlan(payload), { plan: startResult(), model: 'gpt-6-luna' });
+  assert.equal(calls[0].url, '/api/coach/start');
+  assert.equal(calls[0].options.method, 'POST');
+  assert.equal(calls[0].options.credentials, 'omit');
+  assert.deepEqual(JSON.parse(calls[0].options.body), payload);
+  for (const value of [undefined, null, {}, { ...payload, consent: false }, { ...payload, consent: 'true' }, { ...payload, consent: 1 }]) await assert.rejects(client.startPlan(value), { code: 'consent_required' });
+  assert.equal(calls.length, 1, 'nothing is sent without the explicit consent flag');
+});
+
+test('native start transport rejects plans that do not fit the answers; errors and aborts never create a fallback plan', async () => {
+  let result = startResult();
+  let received;
+  const client = createCoachClient({ isNative: true, http: { request: async options => {
+    received = options;
+    return { status: 200, data: { plan: result, model: 'gpt-6-luna' } };
+  } } });
+  const payload = startPayload();
+  assert.equal((await client.startPlan(payload)).plan.variants.length, 3);
+  assert.equal(received.url, `${EMULATOR_COACH_ORIGIN}/api/coach/start`);
+  assert.deepEqual(received.data, payload);
+  const broken = change => { const value = startResult(); change(value); return value; };
+  for (const value of [
+    undefined, null, 'план', {},
+    broken(plan => { plan.variants[0].items[1].minutes = 22; }),
+    broken(plan => { plan.variants.reverse(); }),
+    broken(plan => { plan.variants = plan.variants.slice(0, 1); }),
+    broken(plan => { plan.variants[1].items.push(startStep('День без солодкого', 5, 'any', 'legendary', 'nutrition')); }),
+    broken(plan => { plan.variants[0].items[0].xp = 130; }),
+    broken(plan => { plan.variants[0].items[0].tier = 'mythic'; }),
+    broken(plan => { plan.applied = true; }),
+  ]) {
+    result = value;
+    await assert.rejects(client.startPlan(payload), { code: 'invalid_start_plan', message: 'План ШІ не відповідає твоїм відповідям. Спробуй ще раз або обери готовий варіант.' });
+  }
+  // The reply is checked against the answers that were sent, not against what the server claims.
+  result = startResult();
+  await assert.rejects(client.startPlan({ ...payload, answers: { ...payload.answers, minutes: 15 } }), { code: 'invalid_start_plan' });
+  await assert.rejects(client.startPlan({ ...payload, answers: undefined }), { code: 'invalid_start_plan' });
+  const controller = new AbortController(); controller.abort();
+  await assert.rejects(client.startPlan(payload, { signal: controller.signal }), { name: 'AbortError' });
+  for (const [status, code] of [[400, 'invalid_start_answers'], [422, 'start_refused'], [429, 'user_daily_limit'], [502, 'invalid_start_plan']]) {
+    const unavailable = createCoachClient({ isNative: false, fetch: async () => ({ status, json: async () => ({ error: { code, message: 'Спробуй пізніше' }, plan: startResult() }) }) });
+    await assert.rejects(unavailable.startPlan(payload), { code, message: 'Спробуй пізніше' });
+  }
 });

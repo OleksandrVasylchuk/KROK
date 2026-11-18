@@ -258,7 +258,7 @@ test('v0.2 storage migration preserves records and XP while adding optional defa
   for (const habit of legacy.habits) for (const key of ['category', 'timeOfDay', 'archived', 'frequency', 'weekdays', 'createdAt']) delete habit[key];
   legacy.expenses = [{ id: 'old-expense', title: 'Кава', amount: 50, category: 'Кафе', date: before(1) }];
   const restored = loadState({ getItem: () => JSON.stringify(legacy) });
-  assert.equal(restored.version, 1); assert.equal(restored.schemaRevision, 5);
+  assert.equal(restored.version, 1); assert.equal(restored.schemaRevision, 6);
   assert.deepEqual(restored.completions, legacy.completions);
   assert.equal(selectStats(restored).totalXp, 40);
   assert.equal(restored.expenses[0].category, 'Кафе'); assert.equal(restored.expenses[0].type, 'expense');

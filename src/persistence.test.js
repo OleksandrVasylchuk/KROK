@@ -68,7 +68,7 @@ test('old backups without expanded fields migrate without losing records', () =>
   for (const quest of state.quests) for (const key of ['archived', 'frequency', 'weekdays', 'scheduledDate', 'goalId']) delete quest[key];
   for (const habit of state.habits) for (const key of ['category', 'timeOfDay', 'frequency', 'weekdays', 'archived', 'createdAt']) delete habit[key];
   const restored = validateBackup(JSON.stringify(state));
-  assert.equal(restored.schemaRevision, 5); assert.deepEqual(restored.completions, state.completions);
+  assert.equal(restored.schemaRevision, 6); assert.deepEqual(restored.completions, state.completions);
   assert.deepEqual(restored.rewards, state.rewards); assert.equal(restored.expenses[0].amount, state.expenses[0].amount);
   assert.deepEqual(restored.goals, []); assert.deepEqual(restored.checkIns, {});
 });
@@ -86,7 +86,7 @@ test('malformed expanded fields cannot silently disappear or normalize into diff
     state => { state.expenses[0].type = 'transfer'; },
     state => { state.expenses[0].account = 'unknown'; },
     state => { state.profile.bio = 'x'.repeat(301); },
-    state => { state.schemaRevision = 6; },
+    state => { state.schemaRevision = 7; },
     state => { state.rewards[0].date = '2199-01-01'; },
     state => { state.goals[0].createdAt = '2199-01-01'; },
     state => { state.habits[0].createdAt = '2199-01-01'; },

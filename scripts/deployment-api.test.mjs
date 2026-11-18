@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { once } from 'node:events';
-import { betaUserAllowed, createDeploymentApi, deploymentPolicy } from './deployment-api.mjs';
+import { betaUserAllowed, createDeploymentApi, deploymentHandler, deploymentPolicy } from './deployment-api.mjs';
 
 const USER = { id: '11111111-1111-4111-8111-111111111111', email: 'tester@example.test', is_anonymous: false, email_confirmed_at: '2026-01-01T12:00:00Z' };
 const ENV = { KROK_ALLOWED_ORIGINS: 'https://krok.example.test', SUPABASE_URL: 'https://qa-project.supabase.co', SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_qa_public_test_key_123456', KROK_AI_ALLOWED_EMAILS: 'tester@example.test', OPENAI_API_KEY: 'sk-synthetic-deployment-test-key' };
@@ -245,4 +245,93 @@ test('client cancellation aborts an in-flight provider request without retrying'
   req.destroy();
   await Promise.race([aborted, new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error('Provider was not aborted')), 1500); timer.unref(); })]);
   assert.equal(f.providerCalls().length, 1);
+});
+
+const START_ANSWERS = { name: 'Олена', change: 'Мати більше енергії', focus: ['body', 'sleep'], minutes: 30, slots: ['morning', 'evening'], level: 'low', obstacles: ['Втома'], quit: '' };
+const START_REQUEST = { answers: START_ANSWERS, date: '2026-11-18', tone: 'supportive', consent: true, existingHabits: [] };
+const startStep = (title, minutes, tier = 'common') => ({ title, description: 'Зроби це у своєму темпі.', category: 'body', minutes, timeOfDay: 'morning', tier });
+const START_PLAN = { summary: 'Олено, ось варіанти на пів години на день.', variants: [
+  { id: 'light', title: 'Легкий старт', note: 'Для дня, коли мало сил.', items: [startStep('Склянка води зранку', 2), startStep('10 хвилин ходьби', 10)] },
+  { id: 'balanced', title: 'Збалансований', note: 'Маленькі кроки й одна більша справа.', items: [startStep('Склянка води зранку', 2), startStep('10 хвилин ходьби', 10), startStep('Легке тренування вдома', 20, 'epic')] },
+] };
+const startCompletion = (plan = START_PLAN) => new Response(JSON.stringify({ status: 'completed', usage: USAGE, output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: JSON.stringify(plan) }] }] }));
+
+test('first-run start route is a fixed deployment entry behind the same sign-in, beta and origin gates', async t => {
+  assert.equal(typeof deploymentHandler('/api/coach/start'), 'function');
+  assert.equal(typeof (await import('../api/coach/start.js')).default, 'function');
+  for (const path of ['/api/coach/starts', '/api/coach/start/', '/api/coach/start?x=1', '/api/start']) assert.throws(() => deploymentHandler(path));
+  const f = await fixture(t, { upstream: () => startCompletion() });
+  assert.equal((await f.request({ path: '/api/coach/start', body: START_REQUEST, headers: { Authorization: '' } })).status, 401);
+  assert.equal((await f.request({ path: '/api/coach/start', body: START_REQUEST, headers: { Origin: 'https://evil.test' } })).status, 403);
+  assert.equal((await f.request({ path: '/api/coach/start', body: START_REQUEST, headers: { Host: 'evil.test' } })).status, 403);
+  const preflight = await f.request({ path: '/api/coach/start', method: 'OPTIONS', headers: { Authorization: '', 'Access-Control-Request-Method': 'POST', 'Access-Control-Request-Headers': 'content-type, authorization' } });
+  assert.equal(preflight.status, 204);
+  assert.equal(preflight.headers['access-control-allow-methods'], 'POST');
+  assert.equal(f.calls.length, 0);
+  for (const setup of [{ user: { ...USER, email: 'other@example.test' } }, { user: { ...USER, email_confirmed_at: null } }, { env: { KROK_AI_ALLOWED_EMAILS: '' } }]) {
+    const denied = await fixture(t, { ...setup, upstream: () => startCompletion() });
+    const result = await denied.request({ path: '/api/coach/start', body: START_REQUEST });
+    assert.equal(result.status, 403);
+    assert.equal(result.data.error.code, 'beta_access_required');
+    assert.equal(denied.providerCalls().length, 0);
+  }
+  const closed = await fixture(t, { env: { SUPABASE_URL: '', SUPABASE_PUBLISHABLE_KEY: '' } });
+  assert.equal((await closed.request({ path: '/api/coach/start', body: START_REQUEST })).data.error.code, 'auth_configuration_error');
+  assert.equal(closed.calls.length, 0);
+});
+
+test('verified beta user gets validated start variants; invalid requests and outputs never become a plan', async t => {
+  let output = START_PLAN;
+  const f = await fixture(t, { upstream: () => startCompletion(output) });
+  for (const [body, code] of [[{ ...START_REQUEST, consent: false }, 'consent_required'], [{ ...START_REQUEST, answers: { ...START_ANSWERS, name: '' } }, 'invalid_start_answers'], [{ ...START_REQUEST, date: '2026-02-30' }, 'invalid_date']]) {
+    const invalid = await f.request({ path: '/api/coach/start', body });
+    assert.equal(invalid.status, 400);
+    assert.equal(invalid.data.error.code, code);
+  }
+  assert.equal(f.providerCalls().length, 0);
+  const response = await f.request({ path: '/api/coach/start', body: START_REQUEST });
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.data, { plan: START_PLAN, model: 'gpt-6-luna' });
+  assert.equal(response.headers['cache-control'], 'no-store');
+  assert.equal(f.providerCalls().length, 1);
+  const payload = JSON.parse(f.providerCalls()[0].options.body);
+  assert.equal(payload.store, false);
+  assert.equal(payload.max_output_tokens, 3500);
+  assert.equal(payload.text.format.name, 'krok_start_plan');
+  assert.match(payload.input[0].content, /^KROK_START_ANSWERS/);
+  assert.equal(JSON.stringify(payload).includes('qa.token'), false);
+  assert.equal(response.text.includes(ENV.OPENAI_API_KEY), false);
+  output = { ...START_PLAN, variants: [START_PLAN.variants[0], { ...START_PLAN.variants[1], items: [...START_PLAN.variants[1].items, startStep('Пробіжка', 30, 'epic')] }] };
+  const invalid = await f.request({ path: '/api/coach/start', body: START_REQUEST });
+  assert.equal(invalid.status, 502);
+  assert.equal(invalid.data.error.code, 'invalid_start_plan');
+  const unknown = await f.request({ path: '/api/coach/start/extra', body: START_REQUEST });
+  assert.equal(unknown.status, 404);
+  assert.equal(f.providerCalls().length, 2);
+});
+
+test('enforced usage counts the start route under the plan kind and a denial never reaches OpenAI', async t => {
+  const f = await fixture(t, { env: { KROK_AI_USAGE: 'enforce' }, rpc: usageRpc(), upstream: () => startCompletion() });
+  assert.equal((await f.request({ path: '/api/coach/start', body: { ...START_REQUEST, consent: 'true' } })).status, 400);
+  assert.equal(f.usageCalls().length + f.providerCalls().length, 0);
+  const response = await f.request({ path: '/api/coach/start', body: START_REQUEST });
+  assert.equal(response.status, 200);
+  assert.deepEqual(f.calls.slice(1).map(call => call.url), [`${ENV.SUPABASE_URL}/auth/v1/user`, `${ENV.SUPABASE_URL}/rest/v1/rpc/krok_ai_reserve`, 'https://api.openai.com/v1/responses', `${ENV.SUPABASE_URL}/rest/v1/rpc/krok_ai_settle`]);
+  const [reserve, settle] = f.usageCalls();
+  assert.deepEqual(JSON.parse(reserve.options.body), { p_kind: 'plan' });
+  assert.equal(reserve.options.headers.Authorization, TOKEN);
+  assert.deepEqual(JSON.parse(settle.options.body), { p_input: 640, p_output: 48 });
+  const denied = await fixture(t, { env: { KROK_AI_USAGE: 'enforce' }, rpc: usageRpc({ allowed: false, reason: 'user_daily' }), upstream: () => startCompletion() });
+  const blocked = await denied.request({ path: '/api/coach/start', body: START_REQUEST });
+  assert.equal(blocked.status, 429);
+  assert.equal(blocked.data.error.code, 'user_daily_limit');
+  assert.deepEqual(JSON.parse(denied.usageCalls()[0].options.body), { p_kind: 'plan' });
+  assert.equal(denied.providerCalls().length, 0);
+});
+
+test('a Git branch preview address is trusted exactly like the deployment address', () => {
+  const policy = deploymentPolicy({ VERCEL_URL: 'krok-abc123-team.vercel.app', VERCEL_BRANCH_URL: 'krok-git-stage-team.vercel.app' });
+  assert.deepEqual(policy.allowedOrigins, ['https://krok-abc123-team.vercel.app', 'https://krok-git-stage-team.vercel.app']);
+  assert.deepEqual(policy.allowedHosts, ['krok-abc123-team.vercel.app', 'krok-git-stage-team.vercel.app']);
+  assert.throws(() => deploymentPolicy({ VERCEL_BRANCH_URL: 'https://evil.example/path' }));
 });

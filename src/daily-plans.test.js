@@ -21,7 +21,7 @@ test('old coach-plan data prefills intake without granting new AI consent or cha
   assert.equal(next.profile.lifeProfile.status, 'in_progress'); assert.equal(next.profile.lifeProfile.dailyMinutes, 30);
   assert.deepEqual(next.profile.lifeProfile.focus, ['sleep', 'body']); assert.equal(next.profile.lifeProfile.domains.sleep.desired, 'Відновити ритм');
   assert.equal(next.profile.lifeProfile.aiConsent, false); assert.equal(next.profile.lifeProfile.about, 'Працюю позмінно');
-  assert.deepEqual(next.dailyPlans, []); assert.equal(next.schemaRevision, 5);
+  assert.deepEqual(next.dailyPlans, []); assert.equal(next.schemaRevision, 6);
 });
 
 test('draft intake updates persist all domains and preserve explicit opt-in only', () => {

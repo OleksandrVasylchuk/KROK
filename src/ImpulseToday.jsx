@@ -2,7 +2,8 @@ import { useState } from 'react';
 import { ArrowRight, ArrowUpRight, BookOpen, Brain, Check, Drop, Fire, Lightning, MoonStars, Plus, Smiley, SmileyMeh, SmileySad, Sparkle, Target, Wallet } from '@phosphor-icons/react';
 import { CATEGORIES, isHabitDue, localDate, selectActiveQuests, selectFinance } from './model.js';
 import CoachView from './CoachView.jsx';
-import DayCycle from './DayCycle.jsx';
+import DayCycle, { WeeklyMeetingCard } from './DayCycle.jsx';
+import { TierBadge, groupBySlot } from './QuestMeta.jsx';
 import JourneyEntry from './JourneyEntry.jsx';
 import { DailyCheckIn } from './JournalView.jsx';
 
@@ -19,7 +20,10 @@ export default function ImpulseToday({ state, dispatch, stats, setPage, openModa
   const done = state.completions[today] || [];
   const plannedIds = new Set((state.dailyPlans || []).filter(plan => plan.date === today).flatMap(plan => plan.appliedQuestIds));
   const quests = selectActiveQuests(state).sort((a, b) => Number(plannedIds.has(b.id)) - Number(plannedIds.has(a.id)));
-  const visibleQuests = showAll ? quests : quests.slice(0, 3);
+  // Once any quest has a part of day, the list becomes the day's routine and is shown whole.
+  const routine = quests.some(quest => quest.timeOfDay && quest.timeOfDay !== 'any');
+  const ordered = groupBySlot(quests).flatMap(group => group.quests);
+  const visibleQuests = routine || showAll ? ordered : ordered.slice(0, 3);
   const habits = state.habits.filter(habit => isHabitDue(habit, today));
   const goals = (state.goals || []).filter(goal => goal.status === 'active');
   const finance = selectFinance(state, { month: today.slice(0, 7) });
@@ -46,6 +50,7 @@ export default function ImpulseToday({ state, dispatch, stats, setPage, openModa
 
     <div className="impulse-layout">
       <div className="impulse-main">
+        <WeeklyMeetingCard state={state} disabled={disabled} />
         <button className="impulse-time-prompt" type="button" disabled={disabled} onClick={() => prepare('У мене є 20 хвилин на себе сьогодні. Допоможи обрати до трьох головних посильних кроків у цей час. Спочатку врахуй наявні справи, якщо я дозволив доступ до них. Якщо потрібно, уточни мою енергію. Не дублюй квести й не підвищуй фізичне навантаження автоматично.')}>
           <span className="impulse-time-icon" aria-hidden="true"><Sparkle size={27} weight="fill" /></span><span><strong>Маєш 20 хвилин?</strong><span>Оберемо головне.</span></span><ArrowRight size={23} />
         </button>
@@ -59,12 +64,13 @@ export default function ImpulseToday({ state, dispatch, stats, setPage, openModa
         </section>
 
         <section id="daily-quests" className="impulse-quests daily-quests" aria-label="План на сьогодні">
-          <div className="impulse-section-heading"><h2>План на сьогодні</h2><button className="impulse-text-link" type="button" onClick={() => setPage('quests')}>Усі квести <ArrowUpRight size={16} /></button></div>
+          <div className="impulse-section-heading"><h2>{routine ? 'Розпорядок дня' : 'План на сьогодні'}</h2><button className="impulse-text-link" type="button" onClick={() => setPage('quests')}>Усі квести <ArrowUpRight size={16} /></button></div>
           <ol className="impulse-quest-list">{visibleQuests.map((quest, index) => {
             const complete = done.includes(quest.id);
-            return <li key={quest.id} className={`impulse-quest-row quest-row ${complete ? 'complete' : ''}`}>
+            const slotStart = routine && (index === 0 || (visibleQuests[index - 1].timeOfDay || 'any') !== (quest.timeOfDay || 'any'));
+            return <li key={quest.id} className={`impulse-quest-row quest-row ${complete ? 'complete' : ''} ${slotStart ? 'has-slot' : ''}`} data-slot={slotStart ? { morning: 'Ранок', day: 'День', evening: 'Вечір' }[quest.timeOfDay] || 'Будь-коли' : undefined}>
               <span className="impulse-quest-number" aria-hidden="true">{String(index + 1).padStart(2, '0')}</span>
-              <div className="impulse-quest-copy"><button type="button" disabled={disabled} onClick={() => toggleQuest(quest)}>{quest.title}</button><span>{CATEGORIES.find(category => category.id === quest.category)?.shortLabel}<i aria-hidden="true">·</i>{quest.minutes} хв<i aria-hidden="true">·</i>+{quest.xp} XP</span></div>
+              <div className="impulse-quest-copy"><button type="button" disabled={disabled} onClick={() => toggleQuest(quest)}>{quest.title}</button><span>{CATEGORIES.find(category => category.id === quest.category)?.shortLabel}<i aria-hidden="true">·</i>{quest.minutes} хв<i aria-hidden="true">·</i>+{quest.xp} XP <TierBadge xp={quest.xp} /></span></div>
               <button className="impulse-quest-check quest-check" type="button" disabled={disabled} aria-label={`${complete ? 'Скасувати' : 'Виконати'}: ${quest.title}`} aria-pressed={complete} onClick={() => toggleQuest(quest)}>{complete && <Check size={18} weight="bold" />}</button>
             </li>;
           })}</ol>
@@ -73,8 +79,8 @@ export default function ImpulseToday({ state, dispatch, stats, setPage, openModa
             <strong>{completed} із {quests.length} кроків</strong>
             <span className="impulse-progress-segments" aria-hidden="true">{quests.length <= 10 ? quests.map(quest => <i key={quest.id} className={done.includes(quest.id) ? 'is-complete' : ''} />) : <span className="impulse-progress-continuous"><i style={{ transform: `scaleX(${completed / quests.length})` }} /></span>}</span><ArrowRight size={23} />
           </button>
-          {quests.length > 3 && <button type="button" className="impulse-expand" aria-expanded={showAll} onClick={() => setShowAll(value => !value)}>{showAll ? 'Показати три найближчі' : `Ще квести: ${quests.length - 3}`}<Plus size={15} className={showAll ? 'is-open' : ''} /></button>}
-          <button type="button" className="impulse-add-quest" disabled={disabled} onClick={() => openModal('quest')}><Plus size={16} /> Додати свій квест</button>
+          {!routine && quests.length > 3 && <button type="button" className="impulse-expand" aria-expanded={showAll} onClick={() => setShowAll(value => !value)}>{showAll ? 'Показати три найближчі' : `Ще квести: ${quests.length - 3}`}<Plus size={15} className={showAll ? 'is-open' : ''} /></button>}
+          <button type="button" className="impulse-add-quest" disabled={disabled} onClick={() => openModal('quest')}><Plus size={16} /> Додати квест до розпорядку</button>
         </section>
 
         <div className="impulse-secondary">

@@ -2,6 +2,7 @@ import { CATEGORIES, localDate, selectStats } from './model.js';
 import { LIFE_DOMAIN_IDS, normalizeLifeProfile, validateDailyPlan } from './life-profile.js';
 import { buildCoachActionContext, validateCoachActions } from './coach-actions.js';
 import { buildCoachPersonalContext } from './coach-personal.js';
+import { validateStartPlan } from './start-plan.js';
 
 export const COACH_MESSAGE_LIMIT = 6000;
 export const COACH_HISTORY_LIMIT = 24;
@@ -237,6 +238,14 @@ export function createCoachClient(runtimeSource = loadRuntime, { baseUrl = impor
       if (!plan || plan.insights.length !== filled.length || plan.insights.some(item => !filled.includes(item.category))) {
         throw new CoachError('invalid_plan', 'План ШІ не відповідає анкеті або доступному часу. Спробуй ще раз.');
       }
+      return { plan, model: clean(data.model, 100) };
+    },
+    /** First-run routine variants. Nothing is created here: the person picks a variant afterwards. */
+    async startPlan(payload, options) {
+      if (payload?.consent !== true) throw new CoachError('consent_required', 'Дозволь передати відповіді ШІ, щоб отримати варіанти розпорядку.');
+      const data = await request('/start', payload, options);
+      const plan = validateStartPlan(data.plan, payload.answers);
+      if (!plan) throw new CoachError('invalid_start_plan', 'План ШІ не відповідає твоїм відповідям. Спробуй ще раз або обери готовий варіант.');
       return { plan, model: clean(data.model, 100) };
     },
     async act(payload, options) {

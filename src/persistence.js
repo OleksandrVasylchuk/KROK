@@ -21,7 +21,7 @@ export function validateBackup(text) {
   let raw;
   try { raw = JSON.parse(text); }
   catch { throw new Error('Файл пошкоджений або не містить коректний JSON.'); }
-  if (!isObject(raw) || raw.version !== 1 || (raw.schemaRevision !== undefined && (!Number.isInteger(raw.schemaRevision) || raw.schemaRevision < 1 || raw.schemaRevision > 5))) {
+  if (!isObject(raw) || raw.version !== 1 || (raw.schemaRevision !== undefined && (!Number.isInteger(raw.schemaRevision) || raw.schemaRevision < 1 || raw.schemaRevision > 6))) {
     throw new Error('Ця версія резервної копії не підтримується. Потрібна копія КРОК версії 1.');
   }
   if (!isObject(raw.profile)
@@ -41,7 +41,7 @@ export function validateBackup(text) {
   let normalized;
   try { normalized = restoreState(raw); }
   catch { throw new Error('Копія містить пошкоджені записи. Поточні дані не змінено.'); }
-  requirePreservedFields(raw.profile, normalized.profile, ['name', 'goal', 'focus', 'onboarded', 'avatar', 'portrait', 'coachTone', 'coachMode', 'coachContextConsent', 'bio', 'occupation', 'coachPlan', 'lifeProfile', 'coachActionsConsent', 'coachMemoryConsent', 'coachJournalConsent']);
+  requirePreservedFields(raw.profile, normalized.profile, ['name', 'goal', 'focus', 'onboarded', 'avatar', 'portrait', 'coachTone', 'coachMode', 'coachContextConsent', 'bio', 'occupation', 'coachPlan', 'lifeProfile', 'coachActionsConsent', 'coachMemoryConsent', 'coachJournalConsent', 'start', 'weeklyMeeting']);
   requirePreservedFields(raw, normalized, ['createdAt', 'budgets', 'checkIns', 'demo', 'dailyPlans', 'coachProposals', 'coachMemory']);
   const acceptedDates = new Set();
   const appliedIds = new Set();
@@ -53,7 +53,7 @@ export function validateBackup(text) {
   // A normalizer may repair optional fields, but importing must never silently
   // discard records (or mistake the model's error fallback for a valid backup).
   const recordFields = {
-    quests: ['id', 'title', 'description', 'category', 'attribute', 'xp', 'minutes', 'archived', 'frequency', 'weekdays', 'scheduledDate', 'goalId'],
+    quests: ['id', 'title', 'description', 'category', 'attribute', 'xp', 'minutes', 'archived', 'frequency', 'weekdays', 'scheduledDate', 'goalId', 'timeOfDay'],
     habits: ['id', 'title', 'icon', 'target', 'unit', 'category', 'timeOfDay', 'archived', 'frequency', 'weekdays', 'createdAt'],
     expenses: ['id', 'title', 'amount', 'category', 'date', 'type', 'account', 'note'],
     rewards: ['id', 'cost', 'date'],

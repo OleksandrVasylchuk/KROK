@@ -3,7 +3,7 @@ import { createCoachApi } from './coach-api.mjs';
 import { createUsageGuard } from './ai-usage.mjs';
 import { validateAuthConfig } from '../src/auth-core.js';
 
-const ROUTES = new Set(['/api/auth/config', '/api/coach', '/api/coach/status', '/api/coach/plan', '/api/coach/actions']);
+const ROUTES = new Set(['/api/auth/config', '/api/coach', '/api/coach/status', '/api/coach/plan', '/api/coach/actions', '/api/coach/start']);
 
 function exactOrigin(value) {
   if (typeof value !== 'string' || !value || value !== value.trim() || /[\s\\*]/.test(value)) throw new Error('Invalid deployment origin');
@@ -18,7 +18,8 @@ export function deploymentPolicy(env = process.env) {
   if (env.KROK_ALLOWED_ORIGINS) {
     for (const value of env.KROK_ALLOWED_ORIGINS.split(',')) origins.add(exactOrigin(value.trim()));
   }
-  for (const name of ['VERCEL_URL', 'VERCEL_PROJECT_PRODUCTION_URL']) {
+  // VERCEL_BRANCH_URL is the stable address of a Git branch preview (staging).
+  for (const name of ['VERCEL_URL', 'VERCEL_BRANCH_URL', 'VERCEL_PROJECT_PRODUCTION_URL']) {
     const host = env[name];
     if (!host) continue;
     // These Vercel variables are hostnames without a protocol or path.

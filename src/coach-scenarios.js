@@ -1,4 +1,4 @@
-import { localDate } from './model.js';
+import { localDate, weeklyMeetingDue } from './model.js';
 
 export const SCENARIO_ANSWER_LIMIT = 600;
 const TIME_OPTIONS = [['5', '5 хвилин'], ['10-15', '10–15 хвилин'], ['20-30', '20–30 хвилин'], ['varies', 'Залежить від дня']];
@@ -36,6 +36,17 @@ export const COACH_SCENARIOS = {
     ],
     request: 'Запропонуй для одного підтвердження: відмітки виконання лише для справ, які я прямо назвав, якщо маєш доступ до моїх записів; запис настрою та енергії, якщо я назвав обидві оцінки; названі витрати з явною сумою; і одну зміну на завтра — спростити або перенести справу, що не вдалася, чи один посильний крок на завтрашню дату. Не карай за пропущене, не створюй борг і не вгадуй те, чого я не казав.',
   },
+  weekly: {
+    id: 'weekly', title: 'Тижнева зустріч із тренером', sendLabel: 'Підбити тиждень', needsRecords: true,
+    lead: 'Чотири запитання — тренер підсумує тиждень і запропонує, що полегшити, посилити, додати чи прибрати.',
+    questions: [
+      { id: 'done', label: 'Що вдалося цього тижня', text: 'Що цього тижня вдалося найкраще?', hint: 'Назви справи або зміни, якими задоволений.', placeholder: 'Наприклад, п’ять днів робив зарядку', required: true },
+      { id: 'missed', label: 'Що не вдалося', text: 'Що не вдалося або давалося важко?', hint: 'Без оцінок — це матеріал для корекції. Можна пропустити.', placeholder: 'Наприклад, вечірнє читання майже щодня пропускав', required: false },
+      { id: 'load', label: 'Яким був план', text: 'Яким був розпорядок цього тижня?', hint: 'Від цього залежить напрям змін.', placeholder: 'Заважкий, якраз чи залегкий', required: true, options: ['Заважкий — полегшити', 'Якраз — залишити', 'Залегкий — посилити'] },
+      { id: 'change', label: 'Що додати або прибрати', text: 'Що хочеш додати або прибрати?', hint: 'Можна пропустити — тренер запропонує сам.', placeholder: 'Наприклад, прибрати читання, додати прогулянку', required: false },
+    ],
+    request: 'Проведи тижневу зустріч: коротко підсумуй тиждень за моїми словами та доступними записами — що вдалося, а що ні. Потім запропонуй для одного підтвердження до п’яти змін розпорядку в названий мною бік: прибрати або спростити те, що не йде, посилити те, що вже легко, додати нове, якщо я просив. Кожному новому квесту дай рівень і частину дня. Не посилюй фізичне навантаження після тижня з пропусками, втомою чи болем і не карай за пропущене.',
+  },
 };
 
 export const scenarioAnswer = value => typeof value === 'string' ? value.replace(/\s+/g, ' ').trim().slice(0, SCENARIO_ANSWER_LIMIT) : '';
@@ -63,8 +74,9 @@ export function scenarioProfilePatch(id, answers, profile = {}) {
 /** A hint for the home screen only. It never starts a conversation or a request by itself. */
 export function suggestedScenario(state, now = new Date()) {
   const today = localDate(now), hour = now.getHours();
-  const startedWithCoach = (state.goals || []).length > 0 || (state.coachProposals || []).some(proposal => proposal.status === 'applied');
+  const startedWithCoach = Boolean(state.profile?.start) || (state.goals || []).length > 0 || (state.coachProposals || []).some(proposal => proposal.status === 'applied');
   if (!startedWithCoach) return 'intro';
+  if (weeklyMeetingDue(state, today)) return 'weekly';
   if (hour >= 18 && !state.checkIns?.[today]) return 'evening';
   if (hour >= 5 && hour < 12) return 'morning';
   return null;

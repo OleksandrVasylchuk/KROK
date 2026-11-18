@@ -1,4 +1,5 @@
-import { CATEGORIES } from './catalog.js';
+import { CATEGORIES, tierXp } from './catalog.js';
+import { normalizeStartAnswers, startAnswersComplete, validateStartVariant } from './start-plan.js';
 import { emptyLifeProfile, normalizeLifeProfile, validateDailyPlan } from './life-profile.js';
 import { COACH_PROPOSAL_LIMIT, normalizeCoachProposal, checkCoachProposal } from './coach-actions.js';
 import { COACH_MEMORY_LIMIT, normalizeCoachMemory } from './coach-personal.js';
@@ -62,8 +63,8 @@ export function createInitialState(today = localDate()) {
   const createdAt = validDate(today) ? today : localDate();
   return {
     version: 1,
-    schemaRevision: 5,
-    profile: { name: 'Друже', goal: 'Щодня ставати трохи ближчим до себе.', focus: 'body', onboarded: false, avatar: '', portrait: DEFAULT_PORTRAIT, coachTone: 'supportive', coachMode: 'openai', coachContextConsent: false, coachActionsConsent: false, coachMemoryConsent: false, coachJournalConsent: false, coachPlan: { priorities: [], desiredChange: '', obstacle: '', dailyTime: '', extra: '', step: 0 }, lifeProfile: emptyLifeProfile(), bio: '', occupation: '' },
+    schemaRevision: 6,
+    profile: { name: 'Друже', goal: 'Щодня ставати трохи ближчим до себе.', focus: 'body', onboarded: false, avatar: '', portrait: DEFAULT_PORTRAIT, coachTone: 'supportive', coachMode: 'openai', coachContextConsent: false, coachActionsConsent: false, coachMemoryConsent: false, coachJournalConsent: false, coachPlan: { priorities: [], desiredChange: '', obstacle: '', dailyTime: '', extra: '', step: 0 }, lifeProfile: emptyLifeProfile(), bio: '', occupation: '', start: null, weeklyMeeting: { lastDate: '' } },
     quests: INITIAL_QUESTS.map(normalizeQuest),
     completions: {},
     habitLogs: {},
@@ -98,6 +99,7 @@ function normalizeQuest(quest) {
     weekdays: weekdays(quest.weekdays),
     scheduledDate: validDate(quest.scheduledDate) ? quest.scheduledDate : '',
     goalId: isId(quest.goalId) ? quest.goalId : null,
+    timeOfDay: ['morning', 'day', 'evening'].includes(quest.timeOfDay) ? quest.timeOfDay : 'any',
   };
 }
 
@@ -183,6 +185,20 @@ export function isQuestDue(quest, date = localDate()) {
   if (quest.frequency === 'weekdays') { const [y, m, d] = date.split('-').map(Number); return weekdays(quest.weekdays).includes(new Date(y, m - 1, d, 12).getDay()); }
   return true;
 }
+/** The weekly meeting with the coach is due seven days after the previous one (or after the start). */
+export function weeklyMeetingDue(state, today = localDate()) {
+  const since = state.profile?.weeklyMeeting?.lastDate || state.createdAt;
+  if (!validDate(since) || !validDate(today)) return false;
+  const days = value => { const [y, m, d] = value.split('-').map(Number); return Math.round(Date.UTC(y, m - 1, d) / 86400000); };
+  return days(today) - days(since) >= 7;
+}
+/** A brand-new profile: nothing done yet and only the starter examples present. */
+export function needsStart(state) {
+  if (state.profile?.onboarded === true || state.profile?.start) return false;
+  const starters = new Set(INITIAL_QUESTS.map(quest => quest.id));
+  return state.quests.every(quest => starters.has(quest.id)) && !Object.keys(state.completions).length && !Object.keys(state.habitLogs).length
+    && !(state.goals ?? []).length && !state.expenses.length && !state.messages.length && !Object.keys(state.checkIns ?? {}).length && !(state.dailyPlans ?? []).length;
+}
 export const selectActiveQuests = (state, date = localDate()) => state.quests.filter(quest => isQuestDue(quest, date) && (quest.frequency !== 'once' || !Object.entries(state.completions).some(([completedDate, ids]) => completedDate !== date && ids.includes(quest.id))));
 export const isHabitDue = (habit, date = localDate()) => isQuestDue(habit, date);
 export const selectActiveHabits = (state, date = localDate()) => state.habits.filter(habit => isHabitDue(habit, date));
@@ -221,6 +237,13 @@ function uniqueItems(items, normalize, limit) {
   return result;
 }
 
+/** The first-run answers and the chosen routine variant; null until the person has passed the start. */
+function normalizeStart(value) {
+  if (!object(value) || !validDate(value.date) || value.date > localDate() || !['light', 'balanced', 'intense'].includes(value.variant) || !['ai', 'local'].includes(value.source)) return null;
+  const answers = normalizeStartAnswers(value.answers);
+  return startAnswersComplete(answers) ? { date: value.date, variant: value.variant, source: value.source, answers } : null;
+}
+
 function normalizeProfile(profile, fallback) {
   if (!object(profile)) return fallback;
   const avatar = profile.avatar === '' || (typeof profile.avatar === 'string' && profile.avatar.length <= 1_500_000 && /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(profile.avatar)) ? profile.avatar : (fallback.avatar ?? '');
@@ -244,6 +267,8 @@ function normalizeProfile(profile, fallback) {
     lifeProfile: Object.hasOwn(profile, 'lifeProfile') ? normalizeLifeProfile(profile.lifeProfile) : migrateLifeProfile(profile),
     avatar,
     portrait,
+    start: normalizeStart(profile.start),
+    weeklyMeeting: { lastDate: validDate(profile.weeklyMeeting?.lastDate) && profile.weeklyMeeting.lastDate <= localDate() ? profile.weeklyMeeting.lastDate : '' },
   };
 }
 
@@ -350,6 +375,29 @@ export function reducer(state, action) {
       if (recorded && ['xp', 'attribute', 'category'].some(key => quest[key] !== old[key])) return state;
       return { ...state, quests: state.quests.map(item => item.id === old.id ? quest : item) };
     }
+    case 'APPLY_START_PLAN': {
+      // One atomic commit after the person picks a routine variant on the first screen.
+      const answers = normalizeStartAnswers(action.answers), variant = validateStartVariant(action.variant, answers);
+      if (!startAnswersComplete(answers) || !variant || !['ai', 'local'].includes(action.source)) return state;
+      const used = new Set([...Object.values(state.completions).flat(), ...(state.dailyPlans ?? []).flatMap(plan => plan.appliedQuestIds)]);
+      const starters = new Set(INITIAL_QUESTS.map(quest => quest.id));
+      // Untouched starter examples make room for the person's own routine; anything already used stays.
+      const kept = state.quests.filter(quest => !starters.has(quest.id) || used.has(quest.id) || quest.goalId);
+      const key = value => value.trim().replace(/s+/g, ' ').toLocaleLowerCase('uk');
+      const taken = new Set(kept.filter(quest => !quest.archived).map(quest => key(quest.title)));
+      const added = variant.items.filter(item => !taken.has(key(item.title))).map(item => normalizeQuest({ id: uniqueId('quest'), title: item.title, description: item.description, category: item.category, minutes: item.minutes, timeOfDay: item.timeOfDay, xp: tierXp(item.tier), frequency: 'daily' }));
+      if (!added.length || added.some(quest => !quest) || kept.length + added.length > 200) return state;
+      const plan = state.profile.coachPlan;
+      const profile = normalizeProfile({
+        ...state.profile, name: answers.name, goal: answers.change.slice(0, 250), focus: answers.focus[0], onboarded: true,
+        coachPlan: { ...plan, priorities: answers.focus, desiredChange: answers.change, obstacle: answers.obstacles.join(', ') || plan.obstacle, dailyTime: { 15: '10-15', 30: '20-30' }[answers.minutes] ?? 'varies' },
+        lifeProfile: { ...state.profile.lifeProfile, dailyMinutes: Math.min(120, answers.minutes), focus: answers.focus },
+        start: { date: today, variant: variant.id, source: action.source, answers },
+        weeklyMeeting: { lastDate: today },
+      }, state.profile);
+      return { ...state, profile, quests: [...kept, ...added] };
+    }
+    case 'COMPLETE_WEEKLY_MEETING': return { ...state, profile: { ...state.profile, weeklyMeeting: { lastDate: today } } };
     case 'ARCHIVE_QUEST':
     case 'RESTORE_QUEST': return state.quests.some(item => item.id === action.id) ? { ...state, quests: state.quests.map(item => item.id === action.id ? { ...item, archived: action.type === 'ARCHIVE_QUEST' } : item) } : state;
     case 'LOG_HABIT':
@@ -460,7 +508,7 @@ export function reducer(state, action) {
         if (operation.type === 'SET_GOAL_PROGRESS' && updated.goals.find(item => item.id === operation.id)?.current !== operation.value) return state;
         if (operation.type === 'UPSERT_COACH_MEMORY' && !updated.coachMemory?.some(item => item.id === operation.memory.id && item.text === operation.memory.text.trim() && item.category === operation.memory.category)) return state;
         if (operation.type === 'DELETE_COACH_MEMORY' && updated.coachMemory?.some(item => item.id === operation.id)) return state;
-        if (operation.type === 'UPDATE_QUEST' && updated === next) return state;
+        if (['UPDATE_QUEST', 'ARCHIVE_QUEST', 'ARCHIVE_HABIT'].includes(operation.type) && updated === next) return state;
         if (operation.type === 'SET_CHECKIN' && !Object.entries(operation.checkIn).every(([key,value]) => updated.checkIns?.[operation.date]?.[key] === (typeof value === 'string' ? value.trim() : value))) return state;
         next = updated;
       }
